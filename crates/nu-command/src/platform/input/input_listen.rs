@@ -8,6 +8,7 @@ use nu_engine::command_prelude::*;
 use nu_protocol::shell_error::io::IoError;
 use num_traits::AsPrimitive;
 use std::io::stdout;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct InputListen;
@@ -29,6 +30,12 @@ impl Command for InputListen {
                 SyntaxShape::List(Box::new(SyntaxShape::String)),
                 "Listen for event of specified types only (can be one of: focus, key, mouse, paste, resize)",
                 Some('t'),
+            )
+            .named(
+                "timeout",
+                SyntaxShape::Duration,
+                "Time to wait for user input",
+                None,
             )
             .switch(
                 "raw",
@@ -113,29 +120,98 @@ There are 4 `key_type` variants:
         }
 
         let console_state = event_type_filter.enable_events(head)?;
-        loop {
-            let event = crossterm::event::read().map_err(|_| ShellError::GenericError {
+
+        let event = if let Some(deadline) = get_timeout_deadline(engine_state, stack, call)? {
+            poll_for_input(deadline, head, &event_type_filter, add_raw)?
+        } else {
+            Some(block_for_input(head, &event_type_filter, add_raw)?)
+        };
+
+        terminal::disable_raw_mode().map_err(|err| IoError::new(err, head, None))?;
+        if config.use_kitty_protocol {
+            let _ = execute!(
+                std::io::stdout(),
+                crossterm::event::PopKeyboardEnhancementFlags
+            );
+        }
+
+        console_state.restore();
+
+        Ok(event.map_or(PipelineData::Empty, |event| event.into_pipeline_data()))
+    }
+}
+
+fn block_for_input(
+    head: Span,
+    event_type_filter: &EventTypeFilter,
+    add_raw: bool,
+) -> Result<Value, ShellError> {
+    loop {
+        if let Some(event) = read_and_parse_event(head, &event_type_filter, add_raw)? {
+            return Ok(event);
+        }
+    }
+}
+
+fn poll_for_input(
+    deadline: Instant,
+    head: Span,
+    event_type_filter: &EventTypeFilter,
+    add_raw: bool,
+) -> Result<Option<Value>, ShellError> {
+    loop {
+        let maximum_wait_time = Instant::now() - deadline;
+        let has_event =
+            crossterm::event::poll(maximum_wait_time).map_err(|_| ShellError::GenericError {
                 error: "Error with user input".into(),
                 msg: "".into(),
                 span: Some(head),
                 help: None,
                 inner: vec![],
             })?;
-            let event = parse_event(head, &event, &event_type_filter, add_raw);
+        if has_event {
+            let event = read_and_parse_event(head, &event_type_filter, add_raw)?;
             if let Some(event) = event {
-                terminal::disable_raw_mode().map_err(|err| IoError::new(err, head, None))?;
-                if config.use_kitty_protocol {
-                    let _ = execute!(
-                        std::io::stdout(),
-                        crossterm::event::PopKeyboardEnhancementFlags
-                    );
-                }
-
-                console_state.restore();
-                return Ok(event.into_pipeline_data());
+                break Ok(Some(event));
             }
         }
+        if Instant::now() >= deadline {
+            break Ok(None);
+        }
     }
+}
+
+fn read_and_parse_event(
+    head: Span,
+    event_type_filter: &EventTypeFilter,
+    add_raw: bool,
+) -> Result<Option<Value>, ShellError> {
+    let event = crossterm::event::read().map_err(|_| ShellError::GenericError {
+        error: "Error with user input".into(),
+        msg: "".into(),
+        span: Some(head),
+        help: None,
+        inner: vec![],
+    })?;
+    Ok(parse_event(head, &event, event_type_filter, add_raw))
+}
+
+fn get_timeout_deadline(
+    engine_state: &EngineState,
+    stack: &mut Stack,
+    call: &Call,
+) -> Result<Option<Instant>, ShellError> {
+    fn duration_from_i64(val: i64) -> Duration {
+        Duration::from_nanos(if val < 0 { 0 } else { val as u64 })
+    }
+
+    let raw_duration = call.get_flag::<i64>(engine_state, stack, "timeout")?;
+
+    Ok(raw_duration.map(|raw| {
+        let duration = duration_from_i64(raw);
+        let now = Instant::now();
+        now + duration
+    }))
 }
 
 fn get_event_type_filter(
