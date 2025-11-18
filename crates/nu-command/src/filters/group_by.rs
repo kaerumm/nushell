@@ -52,7 +52,7 @@ impl Command for GroupBy {
         group_by(engine_state, stack, call, input)
     }
 
-    fn examples(&self) -> Vec<Example> {
+    fn examples(&self) -> Vec<Example<'_>> {
         vec![
             Example {
                 description: "Group items by the \"type\" column's values",
@@ -214,6 +214,37 @@ impl Command for GroupBy {
                     }),
                 ])),
             },
+            Example {
+                description: "Group items by column and delete the original",
+                example: r#"[
+        [name, lang, year];
+        [andres, rb, "2019"],
+        [jt, rs, "2019"],
+        [storm, rs, "2021"]
+    ]
+    | group-by lang | update cells { reject lang }"#,
+                #[cfg(test)] // Cannot test this example, it requires the nu-cmd-extra crate.
+                result: None,
+                #[cfg(not(test))]
+                result: Some(Value::test_record(record! {
+                        "rb" => Value::test_list(vec![Value::test_record(record! {
+                                        "name" => Value::test_string("andres"),
+                                        "year" => Value::test_string("2019"),
+                                })],
+                            ),
+                        "rs" => Value::test_list(
+                                    vec![
+                                    Value::test_record(record! {
+                                            "name" => Value::test_string("jt"),
+                                            "year" => Value::test_string("2019"),
+                                    }),
+                                    Value::test_record(record! {
+                                            "name" => Value::test_string("storm"),
+                                            "year" => Value::test_string("2021"),
+                                    })
+                            ]),
+                })),
+            },
         ]
     }
 }
@@ -231,7 +262,12 @@ pub fn group_by(
 
     let values: Vec<Value> = input.into_iter().collect();
     if values.is_empty() {
-        return Ok(Value::record(Record::new(), head).into_pipeline_data());
+        let val = if to_table {
+            Value::list(Vec::new(), head)
+        } else {
+            Value::record(Record::new(), head)
+        };
+        return Ok(val.into_pipeline_data());
     }
 
     let grouped = match &groupers[..] {

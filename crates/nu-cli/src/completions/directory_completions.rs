@@ -3,13 +3,13 @@ use crate::completions::{
     completion_common::{AdjustView, adjust_if_intermediate, complete_item},
 };
 use nu_protocol::{
-    Span,
+    Span, SuggestionKind,
     engine::{EngineState, Stack, StateWorkingSet},
 };
 use reedline::Suggestion;
 use std::path::Path;
 
-use super::{SemanticSuggestion, SuggestionKind, completion_common::FileSuggestion};
+use super::{SemanticSuggestion, completion_common::FileSuggestion};
 
 pub struct DirectoryCompletion;
 
@@ -58,13 +58,13 @@ impl Completer for DirectoryCompletion {
         for item in items.into_iter() {
             let item_path = Path::new(&item.suggestion.value);
 
-            if let Some(value) = item_path.file_name() {
-                if let Some(value) = value.to_str() {
-                    if value.starts_with('.') {
-                        hidden.push(item);
-                    } else {
-                        non_hidden.push(item);
-                    }
+            if let Some(value) = item_path.file_name()
+                && let Some(value) = value.to_str()
+            {
+                if value.starts_with('.') {
+                    hidden.push(item);
+                } else {
+                    non_hidden.push(item);
                 }
             }
         }

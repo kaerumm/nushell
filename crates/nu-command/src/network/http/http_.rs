@@ -1,5 +1,6 @@
 use nu_engine::{command_prelude::*, get_full_help};
 
+use super::client::RedirectMode;
 use super::get::run_get;
 use super::post::run_post;
 
@@ -69,7 +70,14 @@ impl Command for Http {
             )
             .switch(
                 "full",
-                "returns the full response instead of only the body",
+                "Returns the record, containing metainformation about the exchange in addition to \
+                 the response.
+                Returning record fields:
+                - urls: list of url redirects this command had to make to get to the destination
+                - headers.request: list of headers passed when doing the request
+                - headers.response: list of received headers
+                - body: the http body of the response
+                - status: the http status of the response\n",
                 Some('f'),
             )
             .switch(
@@ -77,11 +85,15 @@ impl Command for Http {
                 "do not fail if the server returns an error code",
                 Some('e'),
             )
-            .named(
-                "redirect-mode",
-                SyntaxShape::String,
-                "What to do when encountering redirects. Default: 'follow'. Valid options: 'follow' ('f'), 'manual' ('m'), 'error' ('e').",
-                Some('R')
+            .param(
+                Flag::new("redirect-mode")
+                    .short('R')
+                    .arg(SyntaxShape::String)
+                    .desc(
+                        "What to do when encountering redirects. Default: 'follow'. Valid \
+                         options: 'follow' ('f'), 'manual' ('m'), 'error' ('e').",
+                    )
+                    .completion(Completion::new_list(RedirectMode::MODES)),
             )
             .category(Category::Network)
     }
@@ -107,23 +119,39 @@ impl Command for Http {
         call: &Call,
         input: PipelineData,
     ) -> Result<PipelineData, ShellError> {
-        let url = call.opt::<Value>(engine_state, stack, 0)?;
-        let data = call.opt::<Value>(engine_state, stack, 1)?;
-        match (url.is_some(), data.is_some()) {
-            (true, true) => run_post(engine_state, stack, call, input),
-            (true, false) => run_get(engine_state, stack, call, input),
-            (false, true) => Err(ShellError::NushellFailed {
+        let url = call.opt::<Spanned<String>>(engine_state, stack, 0)?;
+        let data: Option<Value> = call.opt::<Value>(engine_state, stack, 1)?;
+
+        // prefer stricter calls over aliasing with variables
+        if let Some(Spanned { item: method, span }) = &url
+            && let method @ ("delete" | "get" | "head" | "options" | "patch" | "post" | "put") =
+                method.to_lowercase().as_str()
+        {
+            return Err(ShellError::GenericError {
+                error: "Invalid command construction".into(),
+                msg: format!(
+                    "Using {method:?} dynamically is bad command construction. You are providing it to the `url` positional argument of `http`"
+                ),
+                span: Some(*span),
+                help: format!("Prefer to use `http {method}` directly").into(),
+                inner: vec![],
+            });
+        }
+
+        match (url, data) {
+            (Some(_), Some(_)) => run_post(engine_state, stack, call, input),
+            (Some(_), None) => run_get(engine_state, stack, call, input),
+            (None, Some(_)) => Err(ShellError::NushellFailed {
                 msg: (String::from("Default verb is get with a payload. Impossible state")),
             }),
-            (false, false) => Ok(Value::string(
-                get_full_help(self, engine_state, stack),
-                call.head,
-            )
-            .into_pipeline_data()),
+            (None, None) => Ok(
+                Value::string(get_full_help(self, engine_state, stack), call.head)
+                    .into_pipeline_data(),
+            ),
         }
     }
 
-    fn examples(&self) -> Vec<Example> {
+    fn examples(&self) -> Vec<Example<'_>> {
         vec![
             Example {
                 description: "Get content from example.com with default verb",

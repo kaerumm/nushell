@@ -2,14 +2,15 @@ use crate::completions::{
     Completer, CompletionOptions, MatchAlgorithm, SemanticSuggestion,
     completer::map_value_completions,
 };
-use nu_engine::eval_call;
+use nu_engine::{compile, eval_call};
+use nu_parser::flatten_expression;
 use nu_protocol::{
-    DeclId, PipelineData, Span, Type, Value,
+    BlockId, DeclId, IntoSpanned, PipelineData, ShellError, Span, Spanned, Type, Value, VarId,
     ast::{Argument, Call, Expr, Expression},
     debugger::WithoutDebug,
-    engine::{EngineState, Stack, StateWorkingSet},
+    engine::{Closure, EngineState, Stack, StateWorkingSet},
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use super::completion_options::NuMatcher;
 
@@ -116,10 +117,10 @@ impl<T: Completer> Completer for CustomCompletion<T> {
                             .and_then(|option| option.try_into().ok())
                         {
                             completion_options.match_algorithm = algorithm;
-                            if let Some(false) = positional {
-                                if completion_options.match_algorithm == MatchAlgorithm::Prefix {
-                                    completion_options.match_algorithm = MatchAlgorithm::Substring
-                                }
+                            if let Some(false) = positional
+                                && completion_options.match_algorithm == MatchAlgorithm::Prefix
+                            {
+                                completion_options.match_algorithm = MatchAlgorithm::Substring
                             }
                         }
                     }
@@ -140,7 +141,7 @@ impl<T: Completer> Completer for CustomCompletion<T> {
                 _ => {
                     log::error!(
                         "Custom completer returned invalid value of type {}",
-                        value.get_type().to_string()
+                        value.get_type()
                     );
                     return vec![];
                 }
@@ -151,18 +152,183 @@ impl<T: Completer> Completer for CustomCompletion<T> {
             }
         };
 
-        let mut matcher = NuMatcher::new(prefix, &completion_options);
+        let mut matcher = NuMatcher::new(prefix, &completion_options, should_sort);
 
-        if should_sort {
-            for sugg in suggestions {
-                matcher.add_semantic_suggestion(sugg);
-            }
-            matcher.results()
+        for sugg in suggestions {
+            matcher.add_semantic_suggestion(sugg);
+        }
+        matcher.suggestion_results()
+    }
+}
+
+pub fn get_command_arguments(
+    working_set: &StateWorkingSet<'_>,
+    element_expression: &Expression,
+) -> Spanned<Vec<Spanned<String>>> {
+    let span = element_expression.span(&working_set);
+    flatten_expression(working_set, element_expression)
+        .iter()
+        .map(|(span, _)| {
+            String::from_utf8_lossy(working_set.get_span_contents(*span))
+                .into_owned()
+                .into_spanned(*span)
+        })
+        .collect::<Vec<_>>()
+        .into_spanned(span)
+}
+
+pub struct CommandWideCompletion<'e> {
+    block_id: BlockId,
+    captures: Vec<(VarId, Value)>,
+    expression: &'e Expression,
+    strip: bool,
+    pub need_fallback: bool,
+}
+
+impl<'a> CommandWideCompletion<'a> {
+    pub fn command(
+        working_set: &StateWorkingSet<'_>,
+        decl_id: DeclId,
+        expression: &'a Expression,
+        strip: bool,
+    ) -> Option<Self> {
+        let block_id = (decl_id.get() < working_set.num_decls())
+            .then(|| working_set.get_decl(decl_id))
+            .and_then(|command| command.block_id())?;
+
+        Some(Self {
+            block_id,
+            captures: vec![],
+            expression,
+            strip,
+            need_fallback: false,
+        })
+    }
+
+    pub fn closure(closure: &'a Closure, expression: &'a Expression, strip: bool) -> Self {
+        Self {
+            block_id: closure.block_id,
+            captures: closure.captures.clone(),
+            expression,
+            strip,
+            need_fallback: false,
+        }
+    }
+}
+
+impl<'a> Completer for CommandWideCompletion<'a> {
+    fn fetch(
+        &mut self,
+        working_set: &StateWorkingSet,
+        stack: &Stack,
+        _prefix: impl AsRef<str>,
+        span: Span,
+        offset: usize,
+        _options: &CompletionOptions,
+    ) -> Vec<SemanticSuggestion> {
+        let Spanned {
+            item: mut args,
+            span: args_span,
+        } = get_command_arguments(working_set, self.expression);
+
+        let mut new_span = span;
+        // strip the placeholder
+        if self.strip
+            && let Some(last) = args.last_mut()
+        {
+            last.item.pop();
+            new_span = Span::new(span.start, span.end.saturating_sub(1));
+        }
+
+        let mut block = working_set.get_block(self.block_id).clone();
+
+        // LSP completion where custom def is parsed but not compiled
+        if block.ir_block.is_none()
+            && let Ok(ir_block) = compile(working_set, &block)
+        {
+            let mut new_block = (*block).clone();
+            new_block.ir_block = Some(ir_block);
+            block = Arc::new(new_block);
+        }
+
+        let mut callee_stack = stack.captures_to_stack_preserve_out_dest(self.captures.clone());
+
+        if let Some(pos_arg) = block.signature.required_positional.first()
+            && let Some(var_id) = pos_arg.var_id
+        {
+            callee_stack.add_var(
+                var_id,
+                Value::list(
+                    args.into_iter()
+                        .map(|Spanned { item, span }| Value::string(item, span))
+                        .collect(),
+                    args_span,
+                ),
+            );
+        }
+        let mut engine_state = working_set.permanent_state.clone();
+        let _ = engine_state.merge_delta(working_set.delta.clone());
+
+        let result = nu_engine::eval_block::<WithoutDebug>(
+            &engine_state,
+            &mut callee_stack,
+            &block,
+            PipelineData::empty(),
+        )
+        .map(|p| p.body);
+
+        if let Some(results) = convert_whole_command_completion_results(offset, new_span, result) {
+            results
         } else {
-            suggestions
-                .into_iter()
-                .filter(|sugg| matcher.matches(&sugg.suggestion.value))
-                .collect()
+            self.need_fallback = true;
+            vec![]
+        }
+    }
+}
+
+/// Converts the output of the external completion closure and whole command custom completion
+/// commands'
+fn convert_whole_command_completion_results(
+    offset: usize,
+    span: Span,
+    result: Result<PipelineData, nu_protocol::ShellError>,
+) -> Option<Vec<SemanticSuggestion>> {
+    let value = match result.and_then(|pipeline_data| pipeline_data.into_value(span)) {
+        Ok(value) => value,
+        Err(err) => {
+            log::error!(
+                "{}",
+                ShellError::GenericError {
+                    error: "nu::shell::completion".into(),
+                    msg: "failed to eval completer block".into(),
+                    span: None,
+                    help: None,
+                    inner: vec![err],
+                }
+            );
+            return Some(vec![]);
+        }
+    };
+
+    match value {
+        Value::List { vals, .. } => Some(map_value_completions(
+            vals.iter(),
+            Span::new(span.start, span.end),
+            offset,
+        )),
+        Value::Nothing { .. } => None,
+        _ => {
+            log::error!(
+                "{}",
+                ShellError::GenericError {
+                    error: "nu::shell::completion".into(),
+                    msg: "completer returned invalid value of type".into(),
+                    span: None,
+                    help: None,
+                    inner: vec![],
+                },
+            );
+            Some(vec![])
         }
     }
 }

@@ -34,7 +34,7 @@ jobs:
       nightly_tag: ${{ steps.vars.outputs.nightly_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         if: github.repository == 'nushell/nightly'
         with:
           ref: main
@@ -127,6 +127,7 @@ jobs:
         - armv7-unknown-linux-musleabihf
         - riscv64gc-unknown-linux-gnu
         - loongarch64-unknown-linux-gnu
+        - loongarch64-unknown-linux-musl
         include:
         - target: aarch64-apple-darwin
           os: macos-latest
@@ -152,10 +153,12 @@ jobs:
           os: ubuntu-22.04
         - target: loongarch64-unknown-linux-gnu
           os: ubuntu-22.04
+        - target: loongarch64-unknown-linux-musl
+          os: ubuntu-22.04
 
     runs-on: ${{matrix.os}}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: main
         fetch-depth: 0
@@ -179,6 +182,7 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       # WARN: Keep the rustflags to prevent from the winget submission error: `CAQuietExec: Error 0xc0000135`
       with:
+        cache: false
         rustflags: ''
 
     - name: Setup Nushell
@@ -252,7 +256,7 @@ jobs:
     needs: [release, sha256sum]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: main
 

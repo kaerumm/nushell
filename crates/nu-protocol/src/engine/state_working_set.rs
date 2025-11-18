@@ -229,12 +229,12 @@ impl<'a> StateWorkingSet<'a> {
 
                 visibility.append(&overlay_frame.visibility);
 
-                if let Some(decl_id) = overlay_frame.get_decl(name) {
-                    if visibility.is_decl_id_visible(&decl_id) {
-                        // Hide decl only if it's not already hidden
-                        overlay_frame.visibility.hide_decl_id(&decl_id);
-                        return Some(decl_id);
-                    }
+                if let Some(decl_id) = overlay_frame.get_decl(name)
+                    && visibility.is_decl_id_visible(&decl_id)
+                {
+                    // Hide decl only if it's not already hidden
+                    overlay_frame.visibility.hide_decl_id(&decl_id);
+                    return Some(decl_id);
                 }
             }
         }
@@ -248,12 +248,12 @@ impl<'a> StateWorkingSet<'a> {
         {
             visibility.append(&overlay_frame.visibility);
 
-            if let Some(decl_id) = overlay_frame.get_decl(name) {
-                if visibility.is_decl_id_visible(&decl_id) {
-                    // Hide decl only if it's not already hidden
-                    self.last_overlay_mut().visibility.hide_decl_id(&decl_id);
-                    return Some(decl_id);
-                }
+            if let Some(decl_id) = overlay_frame.get_decl(name)
+                && visibility.is_decl_id_visible(&decl_id)
+            {
+                // Hide decl only if it's not already hidden
+                self.last_overlay_mut().visibility.hide_decl_id(&decl_id);
+                return Some(decl_id);
             }
         }
 
@@ -445,30 +445,28 @@ impl<'a> StateWorkingSet<'a> {
         let mut visibility: Visibility = Visibility::new();
 
         for scope_frame in self.delta.scope.iter().rev() {
-            if self.search_predecls {
-                if let Some(decl_id) = scope_frame.predecls.get(name) {
-                    if visibility.is_decl_id_visible(decl_id) {
-                        return Some(*decl_id);
-                    }
-                }
+            if self.search_predecls
+                && let Some(decl_id) = scope_frame.predecls.get(name)
+                && visibility.is_decl_id_visible(decl_id)
+            {
+                return Some(*decl_id);
             }
 
             // check overlay in delta
             for overlay_frame in scope_frame.active_overlays(&mut removed_overlays).rev() {
                 visibility.append(&overlay_frame.visibility);
 
-                if self.search_predecls {
-                    if let Some(decl_id) = overlay_frame.predecls.get(name) {
-                        if visibility.is_decl_id_visible(decl_id) {
-                            return Some(*decl_id);
-                        }
-                    }
+                if self.search_predecls
+                    && let Some(decl_id) = overlay_frame.predecls.get(name)
+                    && visibility.is_decl_id_visible(decl_id)
+                {
+                    return Some(*decl_id);
                 }
 
-                if let Some(decl_id) = overlay_frame.get_decl(name) {
-                    if visibility.is_decl_id_visible(&decl_id) {
-                        return Some(decl_id);
-                    }
+                if let Some(decl_id) = overlay_frame.get_decl(name)
+                    && visibility.is_decl_id_visible(&decl_id)
+                {
+                    return Some(decl_id);
                 }
             }
         }
@@ -628,7 +626,7 @@ impl<'a> StateWorkingSet<'a> {
             name.insert(0, b'$');
         }
 
-        self.last_overlay_mut().vars.insert(name, next_id);
+        self.last_overlay_mut().insert_variable(name, next_id);
 
         self.delta.vars.push(Variable::new(span, ty, mutable));
 
@@ -744,6 +742,23 @@ impl<'a> StateWorkingSet<'a> {
         }
     }
 
+    /// Apply a function to all commands. The function accepts a command name and its DeclId
+    pub fn traverse_commands(&self, mut f: impl FnMut(&[u8], DeclId)) {
+        for scope_frame in self.delta.scope.iter().rev() {
+            for overlay_id in scope_frame.active_overlays.iter().rev() {
+                let overlay_frame = scope_frame.get_overlay(*overlay_id);
+
+                for (name, decl_id) in &overlay_frame.decls {
+                    if overlay_frame.visibility.is_decl_id_visible(decl_id) {
+                        f(name, *decl_id);
+                    }
+                }
+            }
+        }
+
+        self.permanent_state.traverse_commands(f);
+    }
+
     pub fn find_commands_by_predicate(
         &self,
         mut predicate: impl FnMut(&[u8]) -> bool,
@@ -751,32 +766,21 @@ impl<'a> StateWorkingSet<'a> {
     ) -> Vec<(DeclId, Vec<u8>, Option<String>, CommandType)> {
         let mut output = vec![];
 
-        for scope_frame in self.delta.scope.iter().rev() {
-            for overlay_id in scope_frame.active_overlays.iter().rev() {
-                let overlay_frame = scope_frame.get_overlay(*overlay_id);
-
-                for (name, decl_id) in &overlay_frame.decls {
-                    if overlay_frame.visibility.is_decl_id_visible(decl_id) && predicate(name) {
-                        let command = self.get_decl(*decl_id);
-                        if ignore_deprecated && command.signature().category == Category::Removed {
-                            continue;
-                        }
-                        output.push((
-                            *decl_id,
-                            name.clone(),
-                            Some(command.description().to_string()),
-                            command.command_type(),
-                        ));
-                    }
-                }
+        self.traverse_commands(|name, decl_id| {
+            if !predicate(name) {
+                return;
             }
-        }
-
-        let mut permanent = self
-            .permanent_state
-            .find_commands_by_predicate(predicate, ignore_deprecated);
-
-        output.append(&mut permanent);
+            let command = self.get_decl(decl_id);
+            if ignore_deprecated && command.signature().category == Category::Removed {
+                return;
+            }
+            output.push((
+                decl_id,
+                name.to_vec(),
+                Some(command.description().to_string()),
+                command.command_type(),
+            ));
+        });
 
         output
     }

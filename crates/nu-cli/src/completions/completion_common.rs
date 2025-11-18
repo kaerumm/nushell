@@ -41,30 +41,31 @@ fn complete_rec(
 ) -> Vec<PathBuiltFromString> {
     let has_more = !partial.is_empty() && (partial.len() > 1 || isdir);
 
-    if let Some((&base, rest)) = partial.split_first() {
-        if base.chars().all(|c| c == '.') && has_more {
-            let built_paths: Vec<_> = built_paths
-                .iter()
-                .map(|built| {
-                    let mut built = built.clone();
-                    built.parts.push(base.to_string());
-                    built.isdir = true;
-                    built
-                })
-                .collect();
-            return complete_rec(
-                rest,
-                &built_paths,
-                options,
-                want_directory,
-                isdir,
-                enable_exact_match,
-            );
-        }
+    if let Some((&base, rest)) = partial.split_first()
+        && base.chars().all(|c| c == '.')
+        && has_more
+    {
+        let built_paths: Vec<_> = built_paths
+            .iter()
+            .map(|built| {
+                let mut built = built.clone();
+                built.parts.push(base.to_string());
+                built.isdir = true;
+                built
+            })
+            .collect();
+        return complete_rec(
+            rest,
+            &built_paths,
+            options,
+            want_directory,
+            isdir,
+            enable_exact_match,
+        );
     }
 
     let prefix = partial.first().unwrap_or(&"");
-    let mut matcher = NuMatcher::new(prefix, options);
+    let mut matcher = NuMatcher::new(prefix, options, true);
 
     let mut exact_match = None;
     // Only relevant for case insensitive matching
@@ -109,22 +110,20 @@ fn complete_rec(
     }
 
     // Don't show longer completions if we have a single exact match (#13204, #14794)
-    if !multiple_exact_matches {
-        if let Some(built) = exact_match {
-            return complete_rec(
-                &partial[1..],
-                &[built],
-                options,
-                want_directory,
-                isdir,
-                true,
-            );
-        }
+    if !multiple_exact_matches && let Some(built) = exact_match {
+        return complete_rec(
+            &partial[1..],
+            &[built],
+            options,
+            want_directory,
+            isdir,
+            true,
+        );
     }
 
     if has_more {
         let mut completions = vec![];
-        for built in matcher.results() {
+        for (built, _) in matcher.results() {
             completions.extend(complete_rec(
                 &partial[1..],
                 &[built],
@@ -136,7 +135,11 @@ fn complete_rec(
         }
         completions
     } else {
-        matcher.results()
+        matcher
+            .results()
+            .into_iter()
+            .map(|(built, _)| built)
+            .collect()
     }
 }
 
@@ -314,7 +317,7 @@ pub fn escape_path(path: String) -> String {
         if path.contains('\'') {
             // decide to use double quotes
             // Path as Debug will do the escaping for `"`, `\`
-            format!("{:?}", path)
+            format!("{path:?}")
         } else {
             format!("'{path}'")
         }

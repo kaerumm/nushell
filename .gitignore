@@ -40,6 +40,9 @@ wix/nu/
 lcov.info
 tarpaulin-report.html
 
+# benchmarking
+/tango
+
 # Visual Studio
 .vs/*
 *.rsproj
@@ -50,6 +53,10 @@ tarpaulin-report.html
 # direnv
 .direnv/
 .envrc
+
+# nix
+/result
+/scripts/nix/result
 
 # pre-commit-hooks
 .pre-commit-config.yaml

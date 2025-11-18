@@ -6,13 +6,13 @@ use nu_plugin_core::{
     util::{Waitable, WaitableMut},
 };
 use nu_plugin_protocol::{
-    CallInfo, CustomValueOp, EngineCall, EngineCallId, EngineCallResponse, EvaluatedCall, Ordering,
-    PluginCall, PluginCallId, PluginCallResponse, PluginCustomValue, PluginInput, PluginOption,
-    PluginOutput, ProtocolInfo,
+    CallInfo, CustomValueOp, EngineCall, EngineCallId, EngineCallResponse, EvaluatedCall,
+    GetCompletionInfo, Ordering, PluginCall, PluginCallId, PluginCallResponse, PluginCustomValue,
+    PluginInput, PluginOption, PluginOutput, ProtocolInfo,
 };
 use nu_protocol::{
-    Config, DeclId, Handler, HandlerGuard, Handlers, LabeledError, PipelineData, PluginMetadata,
-    PluginSignature, ShellError, SignalAction, Signals, Span, Spanned, Value,
+    Config, DeclId, DynamicSuggestion, Handler, HandlerGuard, Handlers, LabeledError, PipelineData,
+    PluginMetadata, PluginSignature, ShellError, SignalAction, Signals, Span, Spanned, Value,
     engine::{Closure, Sequence},
 };
 use nu_utils::SharedCow;
@@ -40,6 +40,10 @@ pub enum ReceivedPluginCall {
     Run {
         engine: EngineInterface,
         call: CallInfo<PipelineData>,
+    },
+    GetCompletion {
+        engine: EngineInterface,
+        info: GetCompletionInfo,
     },
     CustomValueOp {
         engine: EngineInterface,
@@ -242,7 +246,7 @@ impl InterfaceManager for EngineInterfaceManager {
     }
 
     fn consume(&mut self, input: Self::Input) -> Result<(), ShellError> {
-        log::trace!("from engine: {:?}", input);
+        log::trace!("from engine: {input:?}");
         match input {
             PluginInput::Hello(info) => {
                 let info = Arc::new(info);
@@ -321,6 +325,12 @@ impl InterfaceManager for EngineInterfaceManager {
                             op,
                         })
                     }
+                    PluginCall::GetCompletion(info) => {
+                        self.send_plugin_call(ReceivedPluginCall::GetCompletion {
+                            engine: interface,
+                            info,
+                        })
+                    }
                 }
             }
             PluginInput::Goodbye => {
@@ -367,7 +377,7 @@ impl InterfaceManager for EngineInterfaceManager {
                         .map(|()| value)
                         .unwrap_or_else(|err| Value::error(err, span))
                 });
-                Ok(PipelineData::ListStream(stream, meta))
+                Ok(PipelineData::list_stream(stream, meta))
             }
             PipelineData::Empty | PipelineData::ByteStream(..) => Ok(data),
         }
@@ -409,6 +419,19 @@ impl EngineInterface {
                 outside of one"
                 .into(),
         })
+    }
+
+    /// Write an OK call response or an error.
+    pub(crate) fn write_ok(
+        &self,
+        result: Result<(), impl Into<LabeledError>>,
+    ) -> Result<(), ShellError> {
+        let response = match result {
+            Ok(()) => PluginCallResponse::Ok,
+            Err(err) => PluginCallResponse::Error(err.into()),
+        };
+        self.write(PluginOutput::CallResponse(self.context()?, response))?;
+        self.flush()
     }
 
     /// Write a call response of either [`PipelineData`] or an error. Returns the stream writer
@@ -455,6 +478,16 @@ impl EngineInterface {
         signature: Vec<PluginSignature>,
     ) -> Result<(), ShellError> {
         let response = PluginCallResponse::Signature(signature);
+        self.write(PluginOutput::CallResponse(self.context()?, response))?;
+        self.flush()
+    }
+
+    /// Write a call response of completion items.
+    pub(crate) fn write_completion_items(
+        &self,
+        items: Option<Vec<DynamicSuggestion>>,
+    ) -> Result<(), ShellError> {
+        let response = PluginCallResponse::CompletionItems(items);
         self.write(PluginOutput::CallResponse(self.context()?, response))?;
         self.flush()
     }
@@ -557,8 +590,8 @@ impl EngineInterface {
         }
     }
 
-    /// Do an engine call returning an `Option<Value>` as either `PipelineData::Empty` or
-    /// `PipelineData::Value`
+    /// Do an engine call returning an `Option<Value>` as either `PipelineData::empty()` or
+    /// `PipelineData::value`
     fn engine_call_option_value(
         &self,
         engine_call: EngineCall<PipelineData>,
@@ -786,7 +819,7 @@ impl EngineInterface {
     /// # use nu_plugin::{EngineInterface, EvaluatedCall};
     /// # fn example(engine: &EngineInterface, call: &EvaluatedCall) -> Result<(), ShellError> {
     /// let closure = call.req(0)?;
-    /// let input = PipelineData::Value(Value::int(4, call.head), None);
+    /// let input = PipelineData::value(Value::int(4, call.head), None);
     /// let output = engine.eval_closure_with_stream(
     ///     &closure,
     ///     vec![],
@@ -885,7 +918,7 @@ impl EngineInterface {
         positional: Vec<Value>,
         input: Option<Value>,
     ) -> Result<Value, ShellError> {
-        let input = input.map_or_else(|| PipelineData::Empty, |v| PipelineData::Value(v, None));
+        let input = input.map_or_else(PipelineData::empty, |v| PipelineData::value(v, None));
         let output = self.eval_closure_with_stream(closure, positional, input, true, false)?;
         // Unwrap an error value
         match output.into_value(closure.span)? {
@@ -924,7 +957,7 @@ impl EngineInterface {
     ///     let commands = engine.call_decl(
     ///         decl_id,
     ///         EvaluatedCall::new(call.head),
-    ///         PipelineData::Empty,
+    ///         PipelineData::empty(),
     ///         true,
     ///         false,
     ///     )?;
@@ -991,7 +1024,7 @@ impl Interface for EngineInterface {
     type DataContext = ();
 
     fn write(&self, output: PluginOutput) -> Result<(), ShellError> {
-        log::trace!("to engine: {:?}", output);
+        log::trace!("to engine: {output:?}");
         self.state.writer.write(&output)
     }
 
@@ -1025,7 +1058,7 @@ impl Interface for EngineInterface {
                         .map(|_| value)
                         .unwrap_or_else(|err| Value::error(err, span))
                 });
-                Ok(PipelineData::ListStream(stream, meta))
+                Ok(PipelineData::list_stream(stream, meta))
             }
             PipelineData::Empty | PipelineData::ByteStream(..) => Ok(data),
         }
@@ -1094,9 +1127,6 @@ fn set_pgrp_from_enter_foreground(pgrp: i64) -> Result<(), ShellError> {
 #[cfg(not(unix))]
 fn set_pgrp_from_enter_foreground(_pgrp: i64) -> Result<(), ShellError> {
     Err(ShellError::NushellFailed {
-        msg: concat!(
-            "EnterForeground asked plugin to join process group, but this is not supported on non UNIX platforms.",
-        )
-        .into(),
+        msg: "EnterForeground asked plugin to join process group, but this is not supported on non UNIX platforms.".to_string(),
     })
 }

@@ -1,8 +1,8 @@
 use crate::completions::{
-    Completer, CompletionOptions, SemanticSuggestion, SuggestionKind, completion_options::NuMatcher,
+    Completer, CompletionOptions, SemanticSuggestion, completion_options::NuMatcher,
 };
 use nu_protocol::{
-    ENV_VARIABLE_ID, Span, Type, Value,
+    ENV_VARIABLE_ID, Span, SuggestionKind, Type, Value,
     ast::{self, Comparison, Expr, Expression},
     engine::{Stack, StateWorkingSet},
 };
@@ -61,7 +61,9 @@ fn number_comparison_ops() -> Vec<OperatorItem> {
                 Comparison::RegexMatch
                     | Comparison::NotRegexMatch
                     | Comparison::StartsWith
+                    | Comparison::NotStartsWith
                     | Comparison::EndsWith
+                    | Comparison::NotEndsWith
                     | Comparison::Has
                     | Comparison::NotHas
             )
@@ -229,7 +231,7 @@ impl Completer for OperatorCompletion<'_> {
             Type::Any => match &self.left_hand_side.expr {
                 Expr::FullCellPath(path) => {
                     // for `$ <tab>`
-                    if matches!(path.head.expr, Expr::Garbage) {
+                    if let Expr::Garbage = path.head.expr {
                         return vec![];
                     }
                     let value =
@@ -255,7 +257,7 @@ impl Completer for OperatorCompletion<'_> {
             });
         }
 
-        let mut matcher = NuMatcher::new(prefix, options);
+        let mut matcher = NuMatcher::new(prefix, options, true);
         for OperatorItem {
             symbols,
             description,
@@ -272,6 +274,6 @@ impl Completer for OperatorCompletion<'_> {
                 kind: Some(SuggestionKind::Operator),
             });
         }
-        matcher.results()
+        matcher.suggestion_results()
     }
 }

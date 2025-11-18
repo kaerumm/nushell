@@ -1,16 +1,16 @@
 use crate::{
-    BlockId, Category, Config, DeclId, FileId, GetSpan, Handlers, HistoryConfig, JobId, Module,
-    ModuleId, OverlayId, ShellError, SignalAction, Signals, Signature, Span, SpanId, Type, Value,
-    VarId, VirtualPathId,
+    BlockId, Config, DeclId, FileId, GetSpan, Handlers, HistoryConfig, JobId, Module, ModuleId,
+    OverlayId, ShellError, SignalAction, Signals, Signature, Span, SpanId, Type, Value, VarId,
+    VirtualPathId,
     ast::Block,
-    cli_error::ReportLog,
     debugger::{Debugger, NoopDebugger},
     engine::{
-        CachedFile, Command, CommandType, DEFAULT_OVERLAY_NAME, EnvVars, OverlayFrame, ScopeFrame,
-        Stack, StateDelta, Variable, Visibility,
+        CachedFile, Command, DEFAULT_OVERLAY_NAME, EnvVars, OverlayFrame, ScopeFrame, Stack,
+        StateDelta, Variable, Visibility,
         description::{Doccomments, build_desc},
     },
     eval_const::create_nu_constant,
+    report_error::ReportLog,
     shell_error::io::IoError,
 };
 use fancy_regex::Regex;
@@ -46,6 +46,8 @@ pub struct ReplState {
     pub buffer: String,
     // A byte position, as `EditCommand::MoveToPosition` is also a byte position
     pub cursor_pos: usize,
+    /// Immediately accept the buffer on the next loop.
+    pub accept: bool,
 }
 
 pub struct IsDebugging(AtomicBool);
@@ -113,6 +115,7 @@ pub struct EngineState {
     pub regex_cache: Arc<Mutex<LruCache<String, Regex>>>,
     pub is_interactive: bool,
     pub is_login: bool,
+    pub is_lsp: bool,
     startup_time: i64,
     is_debugging: IsDebugging,
     pub debugger: Arc<Mutex<Box<dyn Debugger>>>,
@@ -185,6 +188,7 @@ impl EngineState {
             repl_state: Arc::new(Mutex::new(ReplState {
                 buffer: "".to_string(),
                 cursor_pos: 0,
+                accept: false,
             })),
             table_decl_id: None,
             #[cfg(feature = "plugin")]
@@ -200,6 +204,7 @@ impl EngineState {
             ))),
             is_interactive: false,
             is_login: false,
+            is_lsp: false,
             startup_time: -1,
             is_debugging: IsDebugging::new(false),
             debugger: Arc::new(Mutex::new(Box::new(NoopDebugger))),
@@ -270,7 +275,7 @@ impl EngineState {
                     existing_overlay.decls.insert(item.0, item.1);
                 }
                 for item in delta_overlay.vars.into_iter() {
-                    existing_overlay.vars.insert(item.0, item.1);
+                    existing_overlay.insert_variable(item.0, item.1);
                 }
                 for item in delta_overlay.modules.into_iter() {
                     existing_overlay.modules.insert(item.0, item.1);
@@ -369,6 +374,23 @@ impl EngineState {
         }
 
         Ok(())
+    }
+
+    /// Clean up unused variables from a Stack to prevent memory leaks.
+    /// This removes variables that are no longer referenced by any overlay.
+    pub fn cleanup_stack_variables(&mut self, stack: &mut Stack) {
+        use std::collections::HashSet;
+
+        let mut shadowed_vars = HashSet::new();
+        for (_, frame) in self.scope.overlays.iter_mut() {
+            shadowed_vars.extend(frame.shadowed_vars.to_owned());
+            frame.shadowed_vars.clear();
+        }
+
+        // Remove variables from stack that are no longer referenced
+        stack
+            .vars
+            .retain(|(var_id, _)| !shadowed_vars.contains(var_id));
     }
 
     pub fn active_overlay_ids<'a, 'b>(
@@ -483,10 +505,10 @@ impl EngineState {
     pub fn get_env_var(&self, name: &str) -> Option<&Value> {
         for overlay_id in self.scope.active_overlays.iter().rev() {
             let overlay_name = String::from_utf8_lossy(self.get_overlay_name(*overlay_id));
-            if let Some(env_vars) = self.env_vars.get(overlay_name.as_ref()) {
-                if let Some(val) = env_vars.get(name) {
-                    return Some(val);
-                }
+            if let Some(env_vars) = self.env_vars.get(overlay_name.as_ref())
+                && let Some(val) = env_vars.get(name)
+            {
+                return Some(val);
             }
         }
 
@@ -500,10 +522,10 @@ impl EngineState {
     pub fn get_env_var_insensitive(&self, name: &str) -> Option<(&String, &Value)> {
         for overlay_id in self.scope.active_overlays.iter().rev() {
             let overlay_name = String::from_utf8_lossy(self.get_overlay_name(*overlay_id));
-            if let Some(env_vars) = self.env_vars.get(overlay_name.as_ref()) {
-                if let Some(v) = env_vars.iter().find(|(k, _)| k.eq_ignore_case(name)) {
-                    return Some((v.0, v.1));
-                }
+            if let Some(env_vars) = self.env_vars.get(overlay_name.as_ref())
+                && let Some(v) = env_vars.iter().find(|(k, _)| k.eq_ignore_case(name))
+            {
+                return Some((v.0, v.1));
             }
         }
 
@@ -635,10 +657,10 @@ impl EngineState {
         for overlay_frame in self.active_overlays(removed_overlays).rev() {
             visibility.append(&overlay_frame.visibility);
 
-            if let Some(decl_id) = overlay_frame.get_decl(name) {
-                if visibility.is_decl_id_visible(&decl_id) {
-                    return Some(decl_id);
-                }
+            if let Some(decl_id) = overlay_frame.get_decl(name)
+                && visibility.is_decl_id_visible(&decl_id)
+            {
+                return Some(decl_id);
             }
         }
 
@@ -731,31 +753,15 @@ impl EngineState {
         None
     }
 
-    pub fn find_commands_by_predicate(
-        &self,
-        mut predicate: impl FnMut(&[u8]) -> bool,
-        ignore_deprecated: bool,
-    ) -> Vec<(DeclId, Vec<u8>, Option<String>, CommandType)> {
-        let mut output = vec![];
-
+    /// Apply a function to all commands. The function accepts a command name and its DeclId
+    pub fn traverse_commands(&self, mut f: impl FnMut(&[u8], DeclId)) {
         for overlay_frame in self.active_overlays(&[]).rev() {
             for (name, decl_id) in &overlay_frame.decls {
-                if overlay_frame.visibility.is_decl_id_visible(decl_id) && predicate(name) {
-                    let command = self.get_decl(*decl_id);
-                    if ignore_deprecated && command.signature().category == Category::Removed {
-                        continue;
-                    }
-                    output.push((
-                        *decl_id,
-                        name.clone(),
-                        Some(command.description().to_string()),
-                        command.command_type(),
-                    ));
+                if overlay_frame.visibility.is_decl_id_visible(decl_id) {
+                    f(name, *decl_id);
                 }
             }
         }
-
-        output
     }
 
     pub fn get_span_contents(&self, span: Span) -> &[u8] {
@@ -766,6 +772,30 @@ impl EngineState {
             }
         }
         &[0u8; 0]
+    }
+
+    /// If the span's content starts with the given prefix, return two subspans
+    /// corresponding to this prefix, and the rest of the content.
+    pub fn span_match_prefix(&self, span: Span, prefix: &[u8]) -> Option<(Span, Span)> {
+        let contents = self.get_span_contents(span);
+
+        if contents.starts_with(prefix) {
+            span.split_at(prefix.len())
+        } else {
+            None
+        }
+    }
+
+    /// If the span's content ends with the given postfix, return two subspans
+    /// corresponding to the rest of the content, and this postfix.
+    pub fn span_match_postfix(&self, span: Span, prefix: &[u8]) -> Option<(Span, Span)> {
+        let contents = self.get_span_contents(span);
+
+        if contents.ends_with(prefix) {
+            span.split_at(span.len() - prefix.len())
+        } else {
+            None
+        }
     }
 
     /// Get the global config from the engine state.
@@ -1008,10 +1038,7 @@ impl EngineState {
         cwd.into_os_string()
             .into_string()
             .map_err(|err| ShellError::NonUtf8Custom {
-                msg: format!(
-                    "The current working directory is not a valid utf-8 string: {:?}",
-                    err
-                ),
+                msg: format!("The current working directory is not a valid utf-8 string: {err:?}"),
                 span: Span::unknown(),
             })
     }
@@ -1032,7 +1059,7 @@ impl EngineState {
     pub fn activate_debugger(
         &self,
         debugger: Box<dyn Debugger>,
-    ) -> Result<(), PoisonDebuggerError> {
+    ) -> Result<(), PoisonDebuggerError<'_>> {
         let mut locked_debugger = self.debugger.lock()?;
         *locked_debugger = debugger;
         locked_debugger.activate();
@@ -1040,7 +1067,7 @@ impl EngineState {
         Ok(())
     }
 
-    pub fn deactivate_debugger(&self) -> Result<Box<dyn Debugger>, PoisonDebuggerError> {
+    pub fn deactivate_debugger(&self) -> Result<Box<dyn Debugger>, PoisonDebuggerError<'_>> {
         let mut locked_debugger = self.debugger.lock()?;
         locked_debugger.deactivate();
         let ret = std::mem::replace(&mut *locked_debugger, Box::new(NoopDebugger));
@@ -1057,6 +1084,7 @@ impl EngineState {
             self.repl_state = Arc::new(Mutex::new(ReplState {
                 buffer: "".to_string(),
                 cursor_pos: 0,
+                accept: false,
             }));
         }
         if Mutex::is_poisoned(&self.jobs) {

@@ -22,13 +22,16 @@ mod tests;
 pub mod test_util;
 
 use nu_protocol::{
-    ByteStreamType, Config, DeclId, LabeledError, PipelineData, PipelineMetadata, PluginMetadata,
-    PluginSignature, ShellError, SignalAction, Span, Spanned, Value, ast::Operator,
-    engine::Closure,
+    ByteStreamType, Config, DeclId, DynamicSuggestion, LabeledError, PipelineData,
+    PipelineMetadata, PluginMetadata, PluginSignature, ShellError, SignalAction, Span, Spanned,
+    Value,
+    ast::Operator,
+    casing::Casing,
+    engine::{ArgType, Closure},
 };
 use nu_utils::SharedCow;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 pub use evaluated_call::EvaluatedCall;
 pub use plugin_custom_value::PluginCustomValue;
@@ -55,6 +58,32 @@ pub struct CallInfo<D> {
     pub call: EvaluatedCall,
     /// Pipeline input. This is usually [`nu_protocol::PipelineData`] or [`PipelineDataHeader`]
     pub input: D,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum GetCompletionArgType {
+    Flag(String),
+    Positional(usize),
+}
+
+impl<'a> From<GetCompletionArgType> for ArgType<'a> {
+    fn from(value: GetCompletionArgType) -> Self {
+        match value {
+            GetCompletionArgType::Flag(flag_name) => {
+                ArgType::Flag(std::borrow::Cow::from(flag_name))
+            }
+            GetCompletionArgType::Positional(idx) => ArgType::Positional(idx),
+        }
+    }
+}
+
+/// Information about `get_dynamic_completion` of a plugin call invocation.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GetCompletionInfo {
+    /// The name of the command to be run.
+    pub name: String,
+    /// The flag name to get completion items.
+    pub arg_type: GetCompletionArgType,
 }
 
 impl<D> CallInfo<D> {
@@ -84,7 +113,7 @@ pub enum PipelineDataHeader {
     ///
     /// Items are sent via [`StreamData`]
     ListStream(ListStreamInfo),
-    /// Initiate [`nu_protocol::PipelineData::ByteStream`].
+    /// Initiate [`nu_protocol::PipelineData::byte_stream`].
     ///
     /// Items are sent via [`StreamData`]
     ByteStream(ByteStreamInfo),
@@ -115,7 +144,7 @@ impl PipelineDataHeader {
 }
 
 /// Additional information about list (value) streams
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ListStreamInfo {
     pub id: StreamId,
     pub span: Span,
@@ -134,7 +163,7 @@ impl ListStreamInfo {
 }
 
 /// Additional information about byte streams
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ByteStreamInfo {
     pub id: StreamId,
     pub span: Span,
@@ -161,6 +190,7 @@ pub enum PluginCall<D> {
     Metadata,
     Signature,
     Run(CallInfo<D>),
+    GetCompletion(GetCompletionInfo),
     CustomValueOp(Spanned<PluginCustomValue>, CustomValueOp),
 }
 
@@ -174,6 +204,7 @@ impl<D> PluginCall<D> {
         Ok(match self {
             PluginCall::Metadata => PluginCall::Metadata,
             PluginCall::Signature => PluginCall::Signature,
+            PluginCall::GetCompletion(flag_name) => PluginCall::GetCompletion(flag_name),
             PluginCall::Run(call) => PluginCall::Run(call.map_data(f)?),
             PluginCall::CustomValueOp(custom_value, op) => {
                 PluginCall::CustomValueOp(custom_value, op)
@@ -186,6 +217,7 @@ impl<D> PluginCall<D> {
         match self {
             PluginCall::Metadata => None,
             PluginCall::Signature => None,
+            PluginCall::GetCompletion(_) => None,
             PluginCall::Run(CallInfo { call, .. }) => Some(call.head),
             PluginCall::CustomValueOp(val, _) => Some(val.span),
         }
@@ -198,13 +230,25 @@ pub enum CustomValueOp {
     /// [`to_base_value()`](nu_protocol::CustomValue::to_base_value)
     ToBaseValue,
     /// [`follow_path_int()`](nu_protocol::CustomValue::follow_path_int)
-    FollowPathInt(Spanned<usize>),
+    FollowPathInt {
+        index: Spanned<usize>,
+        optional: bool,
+    },
     /// [`follow_path_string()`](nu_protocol::CustomValue::follow_path_string)
-    FollowPathString(Spanned<String>),
+    FollowPathString {
+        column_name: Spanned<String>,
+        optional: bool,
+        casing: Casing,
+    },
     /// [`partial_cmp()`](nu_protocol::CustomValue::partial_cmp)
     PartialCmp(Value),
     /// [`operation()`](nu_protocol::CustomValue::operation)
     Operation(Spanned<Operator>, Value),
+    /// [`save()`](nu_protocol::CustomValue::save)
+    Save {
+        path: Spanned<PathBuf>,
+        save_call_span: Span,
+    },
     /// Notify that the custom value has been dropped, if
     /// [`notify_plugin_on_drop()`](nu_protocol::CustomValue::notify_plugin_on_drop) is true
     Dropped,
@@ -215,10 +259,11 @@ impl CustomValueOp {
     pub fn name(&self) -> &'static str {
         match self {
             CustomValueOp::ToBaseValue => "to_base_value",
-            CustomValueOp::FollowPathInt(_) => "follow_path_int",
-            CustomValueOp::FollowPathString(_) => "follow_path_string",
+            CustomValueOp::FollowPathInt { .. } => "follow_path_int",
+            CustomValueOp::FollowPathString { .. } => "follow_path_string",
             CustomValueOp::PartialCmp(_) => "partial_cmp",
             CustomValueOp::Operation(_, _) => "operation",
+            CustomValueOp::Save { .. } => "save",
             CustomValueOp::Dropped => "dropped",
         }
     }
@@ -352,10 +397,12 @@ pub enum StreamMessage {
 /// Response to a [`PluginCall`]. The type parameter determines the output type for pipeline data.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum PluginCallResponse<D> {
+    Ok,
     Error(LabeledError),
     Metadata(PluginMetadata),
     Signature(Vec<PluginSignature>),
     Ordering(Option<Ordering>),
+    CompletionItems(Option<Vec<DynamicSuggestion>>),
     PipelineData(D),
 }
 
@@ -367,10 +414,14 @@ impl<D> PluginCallResponse<D> {
         f: impl FnOnce(D) -> Result<T, ShellError>,
     ) -> Result<PluginCallResponse<T>, ShellError> {
         Ok(match self {
+            PluginCallResponse::Ok => PluginCallResponse::Ok,
             PluginCallResponse::Error(err) => PluginCallResponse::Error(err),
             PluginCallResponse::Metadata(meta) => PluginCallResponse::Metadata(meta),
             PluginCallResponse::Signature(sigs) => PluginCallResponse::Signature(sigs),
             PluginCallResponse::Ordering(ordering) => PluginCallResponse::Ordering(ordering),
+            PluginCallResponse::CompletionItems(items) => {
+                PluginCallResponse::CompletionItems(items)
+            }
             PluginCallResponse::PipelineData(input) => PluginCallResponse::PipelineData(f(input)?),
         })
     }
@@ -650,11 +701,11 @@ impl<D> EngineCallResponse<D> {
 impl EngineCallResponse<PipelineData> {
     /// Build an [`EngineCallResponse::PipelineData`] from a [`Value`]
     pub fn value(value: Value) -> EngineCallResponse<PipelineData> {
-        EngineCallResponse::PipelineData(PipelineData::Value(value, None))
+        EngineCallResponse::PipelineData(PipelineData::value(value, None))
     }
 
-    /// An [`EngineCallResponse::PipelineData`] with [`PipelineData::Empty`]
+    /// An [`EngineCallResponse::PipelineData`] with [`PipelineData::empty()`]
     pub const fn empty() -> EngineCallResponse<PipelineData> {
-        EngineCallResponse::PipelineData(PipelineData::Empty)
+        EngineCallResponse::PipelineData(PipelineData::empty())
     }
 }

@@ -50,7 +50,7 @@ fn def_twice_should_fail() -> TestResult {
 
 #[test]
 fn missing_parameters() -> TestResult {
-    fail_test(r#"def foo {}"#, "Missing required positional")
+    fail_test(r#"def foo {}"#, "expected [ or (")
 }
 
 #[test]
@@ -295,16 +295,16 @@ fn path_argument_dont_make_absolute_if_unquoted() -> TestResult {
 fn dont_allow_implicit_casting_between_glob_and_string() -> TestResult {
     let _ = fail_test(
         r#"def spam [foo: string] { echo $foo }; let f: glob = 'aa'; spam $f"#,
-        "expected string",
+        "expected string, found glob",
     );
-    fail_test(
+    run_test(
         r#"def spam [foo: glob] { echo $foo }; let f = 'aa'; spam $f"#,
-        "can't convert",
+        "aa",
     )
 }
 
 #[test]
 fn allow_pass_negative_float() -> TestResult {
     run_test("def spam [val: float] { $val }; spam -1.4", "-1.4")?;
-    run_test("def spam [val: float] { $val }; spam -2", "-2")
+    run_test("def spam [val: float] { $val }; spam -2", "-2.0")
 }

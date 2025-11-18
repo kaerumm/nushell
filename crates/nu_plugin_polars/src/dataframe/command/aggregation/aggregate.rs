@@ -1,13 +1,12 @@
 use crate::{
     PolarsPlugin,
     dataframe::values::{NuExpression, NuLazyFrame, NuLazyGroupBy},
-    values::{Column, CustomValueSupport, NuDataFrame},
+    values::{Column, CustomValueSupport, NuDataFrame, PolarsPluginType},
 };
 
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{
-    Category, Example, LabeledError, PipelineData, ShellError, Signature, Span, SyntaxShape, Type,
-    Value,
+    Category, Example, LabeledError, PipelineData, ShellError, Signature, Span, SyntaxShape, Value,
 };
 use polars::{datatypes::DataType, prelude::Expr};
 
@@ -32,14 +31,20 @@ impl PluginCommand for LazyAggregate {
                 SyntaxShape::Any,
                 "Expression(s) that define the aggregations to be applied",
             )
-            .input_output_type(
-                Type::Custom("dataframe".into()),
-                Type::Custom("dataframe".into()),
-            )
+            .input_output_types(vec![
+                (
+                    PolarsPluginType::NuDataFrame.into(),
+                    PolarsPluginType::NuDataFrame.into(),
+                ),
+                (
+                    PolarsPluginType::NuLazyFrame.into(),
+                    PolarsPluginType::NuLazyFrame.into(),
+                ),
+            ])
             .category(Category::Custom("lazyframe".into()))
     }
 
-    fn examples(&self) -> Vec<Example> {
+    fn examples(&self) -> Vec<Example<'_>> {
         vec![
             Example {
                 description: "Group by and perform an aggregation",
@@ -138,7 +143,7 @@ impl PluginCommand for LazyAggregate {
             if let Some(name) = get_col_name(expr) {
                 let dtype = group_by.schema.schema.get(name.as_str());
 
-                if matches!(dtype, Some(DataType::Object(..))) {
+                if let Some(DataType::Object(..)) = dtype {
                     return Err(ShellError::GenericError {
                             error: "Object type column not supported for aggregation".into(),
                             msg: format!("Column '{name}' is type Object"),
@@ -170,12 +175,13 @@ fn get_col_name(expr: &Expr) -> Option<String> {
             | polars::prelude::AggExpr::Last(e)
             | polars::prelude::AggExpr::Mean(e)
             | polars::prelude::AggExpr::Implode(e)
-            | polars::prelude::AggExpr::Count(e, _)
+            | polars::prelude::AggExpr::Count { input: e, .. }
             | polars::prelude::AggExpr::Sum(e)
             | polars::prelude::AggExpr::AggGroups(e)
             | polars::prelude::AggExpr::Std(e, _)
-            | polars::prelude::AggExpr::Var(e, _) => get_col_name(e.as_ref()),
-            polars::prelude::AggExpr::Quantile { expr, .. } => get_col_name(expr.as_ref()),
+            | polars::prelude::AggExpr::Var(e, _)
+            | polars::prelude::AggExpr::Item { input: e, .. }
+            | polars::prelude::AggExpr::Quantile { expr: e, .. } => get_col_name(e.as_ref()),
         },
         Expr::Filter { input: expr, .. }
         | Expr::Slice { input: expr, .. }
@@ -183,26 +189,23 @@ fn get_col_name(expr: &Expr) -> Option<String> {
         | Expr::Sort { expr, .. }
         | Expr::Gather { expr, .. }
         | Expr::SortBy { expr, .. }
-        | Expr::Exclude(expr, _)
-        | Expr::Alias(expr, _)
         | Expr::KeepName(expr)
         | Expr::Explode { input: expr, .. } => get_col_name(expr.as_ref()),
         Expr::Ternary { .. }
         | Expr::AnonymousFunction { .. }
         | Expr::Function { .. }
-        | Expr::Columns(_)
-        | Expr::DtypeColumn(_)
         | Expr::Literal(_)
         | Expr::BinaryExpr { .. }
         | Expr::Window { .. }
-        | Expr::Wildcard
         | Expr::RenameAlias { .. }
         | Expr::Len
-        | Expr::Nth(_)
         | Expr::SubPlan(_, _)
-        | Expr::IndexColumn(_)
         | Expr::Selector(_)
-        | Expr::Field(_) => None,
+        | Expr::Field(_)
+        | Expr::Alias(_, _)
+        | Expr::DataTypeFunction(_)
+        | Expr::Element
+        | Expr::Eval { .. } => None,
     }
 }
 
