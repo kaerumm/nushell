@@ -1,9 +1,9 @@
 use crate::network::http::client::add_unix_socket_flag;
 use crate::network::http::client::{
     check_response_redirection, expand_unix_socket_path, extract_response_headers,
-    handle_response_status, headers_to_nu, http_client, http_parse_redirect_mode, http_parse_url,
-    request_add_authorization_header, request_add_custom_headers, request_set_timeout,
-    send_request_no_body,
+    handle_response_status, headers_to_nu, http_client, http_client_pool, http_parse_redirect_mode,
+    http_parse_url, request_add_authorization_header, request_add_custom_headers,
+    request_set_timeout, send_request_no_body,
 };
 use nu_engine::command_prelude::*;
 use nu_protocol::Signals;
@@ -56,6 +56,7 @@ impl Command for HttpHead {
                 "allow insecure server connections when using SSL",
                 Some('k'),
             )
+            .switch("pool", "using a global pool as a client", None)
             .param(
                 Flag::new("redirect-mode")
                     .short('R')
@@ -129,6 +130,7 @@ struct Arguments {
     timeout: Option<Value>,
     redirect: Option<Spanned<String>>,
     unix_socket: Option<Spanned<String>>,
+    pool: bool,
 }
 
 fn run_head(
@@ -146,6 +148,7 @@ fn run_head(
         timeout: call.get_flag(engine_state, stack, "max-time")?,
         redirect: call.get_flag(engine_state, stack, "redirect-mode")?,
         unix_socket: call.get_flag(engine_state, stack, "unix-socket")?,
+        pool: call.has_flag(engine_state, stack, "pool")?,
     };
 
     helper(engine_state, stack, call, args, engine_state.signals())
@@ -160,26 +163,34 @@ fn helper(
     signals: &Signals,
 ) -> Result<PipelineData, ShellError> {
     let span = args.url.span();
-    let (requested_url, _) = http_parse_url(call, span, args.url)?;
+    let Spanned {
+        item: (requested_url, _),
+        span: request_span,
+    } = http_parse_url(call, span, args.url)?;
     let redirect_mode = http_parse_redirect_mode(args.redirect)?;
 
     let cwd = engine_state.cwd(None)?;
     let unix_socket_path = expand_unix_socket_path(args.unix_socket, &cwd);
 
-    let client = http_client(
-        args.insecure,
-        redirect_mode,
-        unix_socket_path,
-        engine_state,
-        stack,
-    )?;
-    let mut request = client.head(&requested_url);
+    let mut request = if args.pool {
+        http_client_pool(engine_state, stack).head(&requested_url)
+    } else {
+        let client = http_client(
+            args.insecure,
+            redirect_mode,
+            unix_socket_path,
+            engine_state,
+            stack,
+        )?;
+        client.head(&requested_url)
+    };
 
     request = request_set_timeout(args.timeout, request)?;
     request = request_add_authorization_header(args.user, args.password, request);
     request = request_add_custom_headers(args.headers, request)?;
 
-    let (response, _request_headers) = send_request_no_body(request, call.head, signals);
+    let (response, _request_headers) =
+        send_request_no_body(request, request_span, call.head, signals);
     let response = response?;
     check_response_redirection(redirect_mode, span, &response)?;
     handle_response_status(&response, redirect_mode, &requested_url, span, false)?;

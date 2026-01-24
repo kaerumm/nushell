@@ -329,7 +329,7 @@ fn loop_iteration(ctx: LoopContext) -> (bool, Stack, Reedline) {
     // Before doing anything, merge the environment from the previous REPL iteration into the
     // permanent state.
     if let Err(err) = engine_state.merge_env(&mut stack) {
-        report_shell_error(engine_state, &err);
+        report_shell_error(None, engine_state, &err);
     }
     perf!("merge env", start_time, use_color);
 
@@ -345,7 +345,7 @@ fn loop_iteration(ctx: LoopContext) -> (bool, Stack, Reedline) {
         engine_state,
         &mut stack,
     ) {
-        report_shell_error(engine_state, &error)
+        report_shell_error(None, engine_state, &error)
     }
     perf!("env-change hook", start_time, use_color);
 
@@ -358,7 +358,7 @@ fn loop_iteration(ctx: LoopContext) -> (bool, Stack, Reedline) {
         &engine_state.get_config().hooks.pre_prompt.clone(),
         "pre_prompt",
     ) {
-        report_shell_error(engine_state, &err);
+        report_shell_error(None, engine_state, &err);
     }
     perf!("pre-prompt hook", start_time, use_color);
 
@@ -420,7 +420,7 @@ fn loop_iteration(ctx: LoopContext) -> (bool, Stack, Reedline) {
     let style_computer = StyleComputer::from_config(engine_state, &stack_arc);
 
     start_time = std::time::Instant::now();
-    line_editor = if config.use_ansi_coloring.get(engine_state) {
+    line_editor = if config.use_ansi_coloring.get(engine_state) && config.show_hints {
         line_editor.with_hinter(Box::new({
             // As of Nov 2022, "hints" color_config closures only get `null` passed in.
             let style = style_computer.compute("hints", &Value::nothing(Span::unknown()));
@@ -436,7 +436,7 @@ fn loop_iteration(ctx: LoopContext) -> (bool, Stack, Reedline) {
     trace!("adding menus");
     line_editor =
         add_menus(line_editor, engine_reference, &stack_arc, config).unwrap_or_else(|e| {
-            report_shell_error(engine_state, &e);
+            report_shell_error(None, engine_state, &e);
             Reedline::create()
         });
 
@@ -558,7 +558,7 @@ fn loop_iteration(ctx: LoopContext) -> (bool, Stack, Reedline) {
                     &engine_state.get_config().hooks.pre_execution.clone(),
                     "pre_execution",
                 ) {
-                    report_shell_error(engine_state, &err);
+                    report_shell_error(None, engine_state, &err);
                 }
             }
 
@@ -869,6 +869,7 @@ fn do_auto_cd(
     let path = {
         if !path.exists() {
             report_shell_error(
+                Some(stack),
                 engine_state,
                 &ShellError::Io(IoError::new_with_additional_context(
                     shell_error::io::ErrorKind::DirectoryNotFound,
@@ -883,6 +884,7 @@ fn do_auto_cd(
 
     if let PermissionResult::PermissionDenied = have_permission(path.clone()) {
         report_shell_error(
+            Some(stack),
             engine_state,
             &ShellError::Io(IoError::new_with_additional_context(
                 shell_error::io::ErrorKind::from_std(std::io::ErrorKind::PermissionDenied),
@@ -899,7 +901,7 @@ fn do_auto_cd(
     //FIXME: this only changes the current scope, but instead this environment variable
     //should probably be a block that loads the information from the state in the overlay
     if let Err(err) = stack.set_cwd(&path) {
-        report_shell_error(engine_state, &err);
+        report_shell_error(Some(stack), engine_state, &err);
         return;
     };
     let cwd = Value::string(cwd, span);
@@ -1056,6 +1058,12 @@ fn run_shell_integration_osc7(
     if let Ok(path) = engine_state.cwd_as_string(Some(stack)) {
         let start_time = Instant::now();
 
+        let path = if cfg!(windows) {
+            path.replace('\\', "/")
+        } else {
+            path
+        };
+
         // Otherwise, communicate the path as OSC 7 (often used for spawning new tabs in the same dir)
         run_ansi_sequence(&format!(
             "\x1b]7;file://{}{}{}\x1b\\",
@@ -1081,10 +1089,7 @@ fn run_shell_integration_osc9_9(engine_state: &EngineState, stack: &mut Stack, u
 
         // Otherwise, communicate the path as OSC 9;9 from ConEmu (often used for spawning new tabs in the same dir)
         // This is helpful in Windows Terminal with Duplicate Tab
-        run_ansi_sequence(&format!(
-            "\x1b]9;9;{}\x1b\\",
-            percent_encoding::utf8_percent_encode(&path, percent_encoding::CONTROLS)
-        ));
+        run_ansi_sequence(&format!("\x1b]9;9;{}\x1b\\", path));
 
         perf!(
             "communicate path to terminal with osc9;9",
@@ -1210,7 +1215,7 @@ fn setup_keybindings(engine_state: &EngineState, line_editor: Reedline) -> Reedl
             }
         },
         Err(e) => {
-            report_shell_error(engine_state, &e);
+            report_shell_error(None, engine_state, &e);
             line_editor
         }
     }

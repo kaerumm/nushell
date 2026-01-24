@@ -1,8 +1,8 @@
 //! [`Span`] to point to sections of source code and the [`Spanned`] wrapper type
-use crate::{IntoValue, SpanId, Value, record};
+use crate::{FromValue, IntoValue, ShellError, SpanId, Value, record};
 use miette::SourceSpan;
 use serde::{Deserialize, Serialize};
-use std::ops::Deref;
+use std::{fmt, ops::Deref};
 
 pub trait GetSpan {
     fn get_span(&self, span_id: SpanId) -> Span;
@@ -54,6 +54,32 @@ impl<T> Spanned<T> {
     }
 }
 
+impl<T> Spanned<&T>
+where
+    T: ToOwned + ?Sized,
+{
+    /// Map the spanned to hold an owned value.
+    pub fn to_owned(&self) -> Spanned<T::Owned> {
+        Spanned {
+            item: self.item.to_owned(),
+            span: self.span,
+        }
+    }
+}
+
+impl<T> Spanned<T>
+where
+    T: AsRef<str>,
+{
+    /// Span the value as a string slice.
+    pub fn as_str(&self) -> Spanned<&str> {
+        Spanned {
+            item: self.item.as_ref(),
+            span: self.span,
+        }
+    }
+}
+
 impl<T, E> Spanned<Result<T, E>> {
     /// Move the `Result` to the outside, resulting in a spanned `Ok` or unspanned `Err`.
     pub fn transpose(self) -> Result<Spanned<T>, E> {
@@ -67,6 +93,21 @@ impl<T, E> Spanned<Result<T, E>> {
                 span: _,
             } => Err(err),
         }
+    }
+}
+
+// With both Display and Into<SourceSpan> implemented on Spanned, we can use Spanned<String> in an
+// error in one field instead of splitting it into two fields
+
+impl<T: fmt::Display> fmt::Display for Spanned<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.item, f)
+    }
+}
+
+impl<T> From<Spanned<T>> for SourceSpan {
+    fn from(value: Spanned<T>) -> Self {
+        value.span.into()
     }
 }
 
@@ -284,6 +325,51 @@ impl IntoValue for Span {
             "end" => Value::int(self.end as i64, self),
         };
         record.into_value(span)
+    }
+}
+
+impl FromValue for Span {
+    fn from_value(value: Value) -> Result<Self, ShellError> {
+        let rec = value.as_record();
+        match rec {
+            Ok(val) => {
+                let Some(pre_start) = val.get("start") else {
+                    return Err(ShellError::GenericError {
+                        error: "Unable to parse Span.".into(),
+                        msg: "`start` must be an `int`".into(),
+                        span: Some(value.span()),
+                        help: None,
+                        inner: vec![],
+                    });
+                };
+                let Some(pre_end) = val.get("end") else {
+                    return Err(ShellError::GenericError {
+                        error: "Unable to parse Span.".into(),
+                        msg: "`end` must be an `int`".into(),
+                        span: Some(value.span()),
+                        help: None,
+                        inner: vec![],
+                    });
+                };
+                let start = pre_start.as_int()? as usize;
+                let end = pre_end.as_int()? as usize;
+                if start <= end {
+                    Ok(Self::new(start, end))
+                } else {
+                    Err(ShellError::GenericError {
+                        error: "Unable to parse Span.".into(),
+                        msg: "`end` must not be less than `start`".into(),
+                        span: Some(value.span()),
+                        help: None,
+                        inner: vec![],
+                    })
+                }
+            }
+            _ => Err(ShellError::TypeMismatch {
+                err_message: "Must be a record".into(),
+                span: value.span(),
+            }),
+        }
     }
 }
 

@@ -1,5 +1,4 @@
-#[allow(deprecated)]
-use nu_engine::{command_prelude::*, env::current_dir};
+use nu_engine::command_prelude::*;
 use std::path::PathBuf;
 use uucore::{localized_help_template, translate};
 
@@ -38,6 +37,7 @@ impl Command for Mktemp {
             .named("tmpdir-path", SyntaxShape::Filepath, "Interpret TEMPLATE relative to tmpdir-path. If tmpdir-path is not set use $TMPDIR", Some('p'))
             .switch("tmpdir", "Interpret TEMPLATE relative to the system temporary directory.", Some('t'))
             .switch("directory", "Create a directory instead of a file.", Some('d'))
+            .switch("dry", "Don't create a file and just return the path that would have been created.", None)
             .category(Category::FileSystem)
     }
 
@@ -84,6 +84,7 @@ impl Command for Mktemp {
             .map(|i: Spanned<String>| i.item)
             .unwrap_or("tmp.XXXXXXXXXX".to_string()); // same as default in coreutils
         let directory = call.has_flag(engine_state, stack, "directory")?;
+        let dry_run = call.has_flag(engine_state, stack, "dry")?;
         let suffix = call.get_flag(engine_state, stack, "suffix")?;
         let tmpdir = call.has_flag(engine_state, stack, "tmpdir")?;
         let tmpdir_path = call
@@ -95,13 +96,12 @@ impl Command for Mktemp {
         } else if directory || tmpdir {
             Some(std::env::temp_dir())
         } else {
-            #[allow(deprecated)]
-            Some(current_dir(engine_state, stack)?)
+            Some(engine_state.cwd(Some(stack))?.into_std_path_buf())
         };
 
         let options = uu_mktemp::Options {
             directory,
-            dry_run: false,
+            dry_run,
             quiet: false,
             suffix,
             template: template.into(),

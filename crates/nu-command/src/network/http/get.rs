@@ -1,9 +1,9 @@
-use crate::network::http::client::add_unix_socket_flag;
 use crate::network::http::client::{
     RequestFlags, RequestMetadata, check_response_redirection, expand_unix_socket_path,
     http_client, http_parse_redirect_mode, http_parse_url, request_add_authorization_header,
     request_add_custom_headers, request_handle_response, request_set_timeout, send_request_no_body,
 };
+use crate::network::http::client::{add_unix_socket_flag, http_client_pool};
 use nu_engine::command_prelude::*;
 
 use super::client::RedirectMode;
@@ -69,6 +69,7 @@ impl Command for HttpGet {
                 "do not fail if the server returns an error code",
                 Some('e'),
             )
+            .switch("pool", "using a global pool as a client", None)
             .param(
                 Flag::new("redirect-mode")
                     .short('R')
@@ -162,6 +163,7 @@ struct Arguments {
     allow_errors: bool,
     redirect: Option<Spanned<String>>,
     unix_socket: Option<Spanned<String>>,
+    pool: bool,
 }
 
 pub fn run_get(
@@ -182,6 +184,7 @@ pub fn run_get(
         allow_errors: call.has_flag(engine_state, stack, "allow-errors")?,
         redirect: call.get_flag(engine_state, stack, "redirect-mode")?,
         unix_socket: call.get_flag(engine_state, stack, "unix-socket")?,
+        pool: call.has_flag(engine_state, stack, "pool")?,
     };
     helper(engine_state, stack, call, args)
 }
@@ -195,26 +198,33 @@ fn helper(
     args: Arguments,
 ) -> Result<PipelineData, ShellError> {
     let span = args.url.span();
-    let (requested_url, _) = http_parse_url(call, span, args.url)?;
+    let Spanned {
+        item: (requested_url, _),
+        span: request_span,
+    } = http_parse_url(call, span, args.url)?;
     let redirect_mode = http_parse_redirect_mode(args.redirect)?;
 
     let cwd = engine_state.cwd(None)?;
     let unix_socket_path = expand_unix_socket_path(args.unix_socket, &cwd);
 
-    let client = http_client(
-        args.insecure,
-        redirect_mode,
-        unix_socket_path,
-        engine_state,
-        stack,
-    )?;
-    let mut request = client.get(&requested_url);
+    let mut request = if args.pool {
+        http_client_pool(engine_state, stack).get(&requested_url)
+    } else {
+        let client = http_client(
+            args.insecure,
+            redirect_mode,
+            unix_socket_path,
+            engine_state,
+            stack,
+        )?;
+        client.get(&requested_url)
+    };
 
     request = request_set_timeout(args.timeout, request)?;
     request = request_add_authorization_header(args.user, args.password, request);
     request = request_add_custom_headers(args.headers, request)?;
     let (response, request_headers) =
-        send_request_no_body(request, call.head, engine_state.signals());
+        send_request_no_body(request, request_span, call.head, engine_state.signals());
 
     let request_flags = RequestFlags {
         raw: args.raw,

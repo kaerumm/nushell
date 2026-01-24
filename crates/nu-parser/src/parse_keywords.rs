@@ -58,7 +58,7 @@ pub const ALIASABLE_PARSER_KEYWORDS: &[&[u8]] = &[
     b"overlay use",
 ];
 
-pub const RESERVED_VARIABLE_NAMES: [&str; 3] = ["in", "nu", "env"];
+pub const RESERVED_VARIABLE_NAMES: [&str; 4] = ["in", "nu", "env", "it"];
 
 /// These parser keywords cannot be aliased (either not possible, or support not yet added)
 pub const UNALIASABLE_PARSER_KEYWORDS: &[&[u8]] = &[
@@ -1262,7 +1262,10 @@ pub fn parse_alias(
             if starting_error_count != working_set.parse_errors.len()
                 && let Some(e) = working_set.parse_errors.get(starting_error_count)
             {
-                if let ParseError::MissingPositional(..) = e {
+                if let ParseError::MissingPositional(..)
+                | ParseError::MissingRequiredFlag(..)
+                | ParseError::MissingFlagParam(..) = e
+                {
                     working_set
                         .parse_errors
                         .truncate(original_starting_error_count);
@@ -1407,7 +1410,6 @@ fn warp_export_call(
         }
         Some(Expr::AttributeBlock(ab)) => {
             if let Expr::Call(def_call) = &mut ab.item.expr {
-                def_call.head = Span::concat(&spans[0..=1]);
                 def_call.decl_id = export_decl_id;
                 return true;
             }

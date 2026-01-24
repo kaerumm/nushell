@@ -52,7 +52,7 @@ const DEFAULT_IDE_COMPLETION_MENU: &str = r#"
     border: true,
     cursor_offset: 0,
     description_mode: "prefer_right"
-    min_description_width: 0
+    min_description_width: 15
     max_description_width: 50
     max_description_height: 10
     description_offset: 1
@@ -100,7 +100,7 @@ const DEFAULT_HELP_MENU: &str = r#"
       col_width: 20
       col_padding: 2
       selection_rows: 4
-      description_rows: 10
+      description_rows: 15
   }
   style: {
       text: green,

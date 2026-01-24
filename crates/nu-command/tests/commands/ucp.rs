@@ -1209,11 +1209,14 @@ fn test_cp_inside_glob_metachars_dir() {
 #[test]
 fn test_cp_to_customized_home_directory() {
     Playground::setup("cp_to_home", |dirs, sandbox| {
-        unsafe {
-            std::env::set_var("HOME", dirs.test());
-        }
         sandbox.with_files(&[EmptyFile("test_file.txt")]);
-        let actual = nu!(cwd: dirs.test(), "mkdir test; cp test_file.txt ~/test/");
+        let actual = nu!(
+            cwd: dirs.test(),
+            envs: vec![
+                ("HOME".into(), dirs.test().to_string_lossy().into())
+            ],
+            "mkdir test; cp test_file.txt ~/test/"
+        );
 
         assert!(actual.err.is_empty());
         assert!(files_exist_at(&["test_file.txt"], dirs.test().join("test")));
@@ -1301,5 +1304,34 @@ fn cp_with_cd() {
             r#"do { cd tmp_dir; let f = 'file.txt'; cp $f .. }; open file.txt"#,
         );
         assert!(actual.out.contains("body"));
+    });
+}
+
+#[test]
+fn test_cp_wildcards() {
+    Playground::setup("cp_with_wildcards", |dirs, sandbox| {
+        let sub_dir = "test[]";
+        sandbox
+            .within(sub_dir)
+            .with_files(&[FileWithContent(".a", "hello")]);
+
+        let actual = nu!(
+            cwd: dirs.test().join(sub_dir),
+            "cp * ../",
+        );
+        // by default, wildcard don't match dot files.
+        assert!(actual.err.contains("File not found"));
+        assert!(files_exist_at(&[".a"], dirs.test().join(sub_dir)));
+        assert!(!files_exist_at(&[".a"], dirs.test()));
+
+        // unless `-a` flag is provided.
+        let actual = nu!(
+            cwd: dirs.test().join(sub_dir),
+            "cp -a * ../",
+        );
+        // by default, wildcard don't match dot files.
+        assert!(actual.err.is_empty());
+        assert!(files_exist_at(&[".a"], dirs.test().join(sub_dir)));
+        assert!(files_exist_at(&[".a"], dirs.test()));
     });
 }

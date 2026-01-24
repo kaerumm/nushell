@@ -54,6 +54,7 @@ pub struct Config {
     pub use_ansi_coloring: UseAnsiColoring,
     pub completions: CompletionConfig,
     pub edit_mode: EditBindings,
+    pub show_hints: bool,
     pub history: HistoryConfig,
     pub keybindings: Vec<ParsedKeybinding>,
     pub menus: Vec<ParsedMenu>,
@@ -68,6 +69,7 @@ pub struct Config {
     pub cursor_shape: CursorShapeConfig,
     pub datetime_format: DatetimeFormatConfig,
     pub error_style: ErrorStyle,
+    pub error_lines: i64,
     pub display_errors: DisplayErrors,
     pub use_kitty_protocol: bool,
     pub highlight_resolved_externals: bool,
@@ -111,6 +113,7 @@ impl Default for Config {
             use_ansi_coloring: UseAnsiColoring::default(),
             bracketed_paste: true,
             edit_mode: EditBindings::default(),
+            show_hints: true,
 
             shell_integration: ShellIntegrationConfig::default(),
 
@@ -122,7 +125,8 @@ impl Default for Config {
 
             keybindings: Vec::new(),
 
-            error_style: ErrorStyle::Fancy,
+            error_style: ErrorStyle::default(),
+            error_lines: 1,
             display_errors: DisplayErrors::default(),
 
             use_kitty_protocol: false,
@@ -162,6 +166,7 @@ impl UpdateFromValue for Config {
                 "float_precision" => self.float_precision.update(val, path, errors),
                 "use_ansi_coloring" => self.use_ansi_coloring.update(val, path, errors),
                 "edit_mode" => self.edit_mode.update(val, path, errors),
+                "show_hints" => self.show_hints.update(val, path, errors),
                 "shell_integration" => self.shell_integration.update(val, path, errors),
                 "buffer_editor" => match val {
                     Value::Nothing { .. } | Value::String { .. } => {
@@ -201,6 +206,17 @@ impl UpdateFromValue for Config {
                 "hooks" => self.hooks.update(val, path, errors),
                 "datetime_format" => self.datetime_format.update(val, path, errors),
                 "error_style" => self.error_style.update(val, path, errors),
+                "error_lines" => {
+                    if let Ok(lines) = val.as_int() {
+                        if lines >= 0 {
+                            self.error_lines = lines;
+                        } else {
+                            errors.invalid_value(path, "an int greater than or equal to 0", val);
+                        }
+                    } else {
+                        errors.type_mismatch(path, Type::Int, val);
+                    }
+                }
                 "recursion_limit" => {
                     if let Ok(limit) = val.as_int() {
                         if limit > 1 {

@@ -119,7 +119,7 @@ impl PluginTest {
                 working_set
                     .parse_errors
                     .iter()
-                    .map(LabeledError::from_diagnostic),
+                    .map(|i| LabeledError::from_diagnostic(i).into()),
             );
             Some(ShellError::LabeledError(error.into()))
         } else {
@@ -290,7 +290,7 @@ impl PluginTest {
                     Err(err) => {
                         // Report the error
                         failed_header();
-                        report_shell_error(&self.engine_state, &err);
+                        report_shell_error(None, &self.engine_state, &err);
                     }
                 }
             }

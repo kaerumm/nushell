@@ -285,18 +285,41 @@ fn customcompletions_no_sort() {
 }
 
 #[test]
-fn custom_completions_override_span() {
+fn customcompletions_no_filter() {
+    let mut completer = custom_completer_with_options(
+        "",
+        r#"filter: false"#,
+        &["zzzfoo", "foo", "not matched", "abcfoo"],
+    );
+    let suggestions = completer.complete("my-command foo", 14);
+    let expected_items = vec!["zzzfoo", "foo", "not matched", "abcfoo"];
+    match_suggestions(&expected_items, &suggestions);
+}
+
+#[rstest]
+#[case::happy("{ start: 1, end: 14 }", (7, 20))]
+#[case::no_start("{ end: 14 }", (17, 20))]
+#[case::no_end("{ start: 1 }", (7, 23))]
+#[case::bad_start("{ start: 100 }", (23, 23))]
+#[case::bad_end("{ end: 100 }", (17, 23))]
+fn custom_completions_override_span(
+    #[case] span_string: &str,
+    #[case] expected_span: (usize, usize),
+) {
     let (_, _, mut engine, mut stack) = new_engine();
-    let command = r#"
-        def comp [] { [{ value: blech, span: { start: 1, end: 10 } }] }
-        def my-command [arg: string@comp] {}"#;
+    let command = format!(
+        r#"
+        def comp [] {{ [{{ value: foobarbaz, span: {span_string} }}] }}
+        def my-command [arg: string@comp] {{}}"#
+    );
     assert!(support::merge_input(command.as_bytes(), &mut engine, &mut stack).is_ok());
 
     let mut completer = NuCompleter::new(Arc::new(engine), Arc::new(stack));
-    let completion_str = "my-command b";
+    let completion_str = "foo | my-command foobar";
     let suggestions = completer.complete(completion_str, completion_str.len());
-    match_suggestions(&vec!["blech"], &suggestions);
-    assert_eq!(Span::new(1, 10), suggestions[0].span);
+    match_suggestions(&vec!["foobarbaz"], &suggestions);
+    let (start, end) = expected_span;
+    assert_eq!(Span::new(start, end), suggestions[0].span);
 }
 
 #[rstest]
@@ -413,6 +436,36 @@ fn command_argument_completions(
     let last_res = suggestions.last().unwrap();
     assert_eq!(last_res.span.start, span_end - span_size);
     assert_eq!(last_res.span.end, span_end);
+}
+
+#[rstest]
+#[case::list_flag_value1("foo --foo=", None, vec!["[f, bar]", "[f, baz]", "[foo]"])]
+#[case::list_flag_value2("foo --foo=[foo", None, vec!["[foo]"])]
+#[case::list_flag_value3("foo --foo [f, b", None, vec!["[f, bar]", "[f, baz]"])]
+#[case::positional1("foo [f, b", None, vec!["[f, bar]", "[f, baz]"])]
+#[case::positional2("foo [foo, b", Some("foo [foo".len()), vec!["[foo]"])]
+#[case::positional3("foo --foo [] [foo", None, vec!["[foo]"])]
+fn custom_completion_for_list_typed_argument(
+    #[case] input: &str,
+    #[case] pos: Option<usize>,
+    #[case] expected: Vec<&str>,
+) {
+    let (_, _, mut engine, mut stack) = new_engine();
+    let command = /* lang=nu */ r#"
+    def comp_foo [input pos] {
+        ["[foo]", "[f, bar]", "[f, baz]"]
+    }
+
+    def foo [--foo: list<string>@comp_foo bar: list<string>@comp_foo] { }
+    "#;
+
+    assert!(support::merge_input(command.as_bytes(), &mut engine, &mut stack).is_ok());
+
+    let mut completer = NuCompleter::new(Arc::new(engine), Arc::new(stack));
+    // `pos` defaults to `input.len()` if set to None
+    let span_end = pos.unwrap_or(input.len());
+    let suggestions = completer.complete(input, span_end);
+    match_suggestions(&expected, &suggestions);
 }
 
 #[test]
@@ -901,15 +954,24 @@ fn external_completer_fallback() {
     match_suggestions(&expected, &suggestions);
 }
 
-#[test]
-fn external_completer_override_span() {
-    let block = "{|spans| [{ value: blech, span: { start: 1, end: 10 } }]}";
-    let input = "foo b";
+#[rstest]
+#[case::happy("{ start: 1, end: 14 }", (7, 20))]
+#[case::no_start("{ end: 14 }", (17, 20))]
+#[case::no_end("{ start: 1 }", (7, 23))]
+#[case::bad_start("{ start: 100 }", (23, 23))]
+#[case::bad_end("{ end: 100 }", (17, 23))]
+fn external_completer_override_span(
+    #[case] span_string: &str,
+    #[case] expected_span: (usize, usize),
+) {
+    let block = format!("{{|spans| [{{ value: foobarbaz, span: {span_string} }}]}}");
+    let input = "foo | extcommand foobar";
 
-    let suggestions = run_external_completion(block, input);
+    let suggestions = run_external_completion(&block, input);
+    let (start, end) = expected_span;
     let expected = vec![Suggestion {
-        value: "blech".to_string(),
-        span: Span::new(1, 10),
+        value: "foobarbaz".to_string(),
+        span: Span::new(start, end),
         ..Default::default()
     }];
     assert_eq!(expected, suggestions);
@@ -1932,7 +1994,7 @@ fn flag_completions() {
 
     // https://github.com/nushell/nushell/issues/16375
     let suggestions = completer.complete("table -", 7);
-    assert_eq!(20, suggestions.len());
+    assert_eq!(22, suggestions.len());
 }
 
 #[test]
@@ -1975,6 +2037,9 @@ fn attributable_completions() {
 
     // Match results
     match_suggestions(&expected, &suggestions);
+
+    // Append space set to true
+    assert!(suggestions[0].append_whitespace);
 }
 
 #[test]
@@ -2241,7 +2306,7 @@ fn variables_completions() {
         "env-path",
         "history-enabled",
         "history-path",
-        "home-path",
+        "home-dir",
         "is-interactive",
         "is-login",
         "is-lsp",
@@ -2250,7 +2315,7 @@ fn variables_completions() {
         "pid",
         "plugin-path",
         "startup-time",
-        "temp-path",
+        "temp-dir",
         "user-autoload-dirs",
         "vendor-autoload-dirs",
     ];
@@ -2263,7 +2328,7 @@ fn variables_completions() {
 
     assert_eq!(3, suggestions.len());
 
-    let expected: Vec<_> = vec!["history-enabled", "history-path", "home-path"];
+    let expected: Vec<_> = vec!["history-enabled", "history-path", "home-dir"];
 
     // Match results
     match_suggestions(&expected, &suggestions);
@@ -2364,6 +2429,97 @@ fn local_variable_completion() {
     let suggestions = completer.complete(completion_str, completion_str.len());
     let expected: Vec<_> = vec!["$foo"];
     match_suggestions(&expected, &suggestions);
+}
+
+#[test]
+fn unlet_variable_current_stack_not_in_completions() {
+    // Test that variables deleted with `unlet` in the current stack
+    // are not available for tab completion
+    let (_, _, mut engine, mut stack) = new_engine();
+
+    // Define a variable
+    let command = b"let myvar = 123";
+    assert!(support::merge_input(command, &mut engine, &mut stack).is_ok());
+
+    // Verify myvar IS available before unlet
+    let mut completer = NuCompleter::new(Arc::new(engine.clone()), Arc::new(stack.clone()));
+    let suggestions = completer.complete("$my", 3);
+    assert!(
+        suggestions.iter().any(|s| s.value == "$myvar"),
+        "Expected $myvar to be in completions before unlet"
+    );
+
+    // Unlet the variable
+    let command = b"unlet $myvar";
+    assert!(support::merge_input(command, &mut engine, &mut stack).is_ok());
+
+    // Verify myvar is NOT available after unlet
+    let mut completer = NuCompleter::new(Arc::new(engine), Arc::new(stack));
+    let suggestions = completer.complete("$my", 3);
+    assert!(
+        !suggestions.iter().any(|s| s.value == "$myvar"),
+        "Expected $myvar to NOT be in completions after unlet"
+    );
+}
+
+#[test]
+fn unlet_variable_parent_stack_not_in_completions() {
+    use nu_protocol::engine::Stack;
+
+    // Test that variables deleted with `unlet` in the parent stack
+    // are not available for tab completion in a child stack
+    let (_, _, mut engine, mut stack) = new_engine();
+
+    // Define a variable in the parent stack
+    let command = b"let myvar = 123";
+    assert!(support::merge_input(command, &mut engine, &mut stack).is_ok());
+
+    // Unlet the variable (this adds the var_id to stack.deletions)
+    let command = b"unlet $myvar";
+    assert!(support::merge_input(command, &mut engine, &mut stack).is_ok());
+
+    // Create a child stack from the parent
+    let child_stack = Stack::with_parent(Arc::new(stack));
+
+    // Verify myvar is NOT available in child stack completions
+    // (the parent's deletions should be propagated via parent_deletions check)
+    let mut completer = NuCompleter::new(Arc::new(engine), Arc::new(child_stack));
+    let suggestions = completer.complete("$my", 3);
+    assert!(
+        !suggestions.iter().any(|s| s.value == "$myvar"),
+        "Expected $myvar to NOT be in completions in child stack after parent unlet"
+    );
+}
+
+#[test]
+fn unlet_variable_grandparent_stack_not_in_completions() {
+    use nu_protocol::engine::Stack;
+
+    // Test that variables deleted with `unlet` in a grandparent stack
+    // are not available for tab completion in a grandchild stack
+    let (_, _, mut engine, mut stack) = new_engine();
+
+    // Define a variable in the grandparent stack
+    let command = b"let myvar = 123";
+    assert!(support::merge_input(command, &mut engine, &mut stack).is_ok());
+
+    // Unlet the variable in grandparent
+    let command = b"unlet $myvar";
+    assert!(support::merge_input(command, &mut engine, &mut stack).is_ok());
+
+    // Create a child stack (parent level)
+    let child_stack = Stack::with_parent(Arc::new(stack));
+
+    // Create a grandchild stack
+    let grandchild_stack = Stack::with_parent(Arc::new(child_stack));
+
+    // Verify myvar is NOT available in grandchild stack completions
+    let mut completer = NuCompleter::new(Arc::new(engine), Arc::new(grandchild_stack));
+    let suggestions = completer.complete("$my", 3);
+    assert!(
+        !suggestions.iter().any(|s| s.value == "$myvar"),
+        "Expected $myvar to NOT be in completions in grandchild stack after grandparent unlet"
+    );
 }
 
 #[test]

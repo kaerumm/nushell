@@ -1572,6 +1572,40 @@ pub fn find_longest_decl_with_prefix(
         }
         maybe_decl_id = working_set.find_decl(&name);
     }
+
+    // If there is a declaration and there are remaining spans, check if it's an alias.
+    // If it is, try to see if there are sub commands
+    if let Some(decl_id) = maybe_decl_id
+        && pos < spans.len()
+    {
+        let decl = working_set.get_decl(decl_id);
+        if let Some(alias) = decl.as_alias() {
+            // Extract the command name from the alias
+            // The wrapped_call should be a Call expression for internal commands
+            if let Expression {
+                expr: Expr::Call(call),
+                ..
+            } = &alias.wrapped_call
+            {
+                let aliased_decl_id = call.decl_id;
+                let aliased_name = working_set.get_decl(aliased_decl_id).name().to_string();
+
+                // Try to find a longer match using the aliased command name with remaining spans
+                let (_, new_pos, new_name, new_decl_id) = find_longest_decl_with_prefix(
+                    working_set,
+                    &spans[pos..],
+                    aliased_name.as_bytes(),
+                );
+
+                // If we find a sub command, use it instead.
+                if new_decl_id.is_some() && new_pos > 0 {
+                    let total_pos = pos + new_pos;
+                    return (cmd_start, total_pos, new_name, new_decl_id);
+                }
+            }
+        }
+    }
+
     (cmd_start, pos, name, maybe_decl_id)
 }
 
@@ -1911,8 +1945,19 @@ pub fn parse_range(working_set: &mut StateWorkingSet, span: Span) -> Option<Expr
         return None;
     }
 
-    // First, figure out what exact operators are used and determine their positions
-    let dotdot_pos: Vec<_> = token.match_indices("..").map(|(pos, _)| pos).collect();
+    let dotdot_pos: Vec<_> = token
+        .match_indices("..")
+        .filter_map(|(pos, _)| {
+            // paren_depth = count of unclosed parens prior to pos
+            let before = &token[..pos];
+            let paren_depth = before
+                .chars()
+                .filter(|&c| c == '(')
+                .count()
+                .checked_sub(before.chars().filter(|&c| c == ')').count());
+            paren_depth.and_then(|d| (d == 0).then_some(pos))
+        })
+        .collect();
 
     let (next_op_pos, range_op_pos) = match dotdot_pos.len() {
         1 => (None, dotdot_pos[0]),
@@ -2740,9 +2785,20 @@ pub fn parse_full_cell_path(
 
 pub fn parse_directory(working_set: &mut StateWorkingSet, span: Span) -> Expression {
     let bytes = working_set.get_span_contents(span);
+    trace!("parsing: directory");
+
+    // Check for bare word interpolation
+    if !bytes.is_empty()
+        && bytes[0] != b'\''
+        && bytes[0] != b'"'
+        && bytes[0] != b'`'
+        && bytes.contains(&b'(')
+    {
+        return parse_string_interpolation(working_set, span);
+    }
+
     let quoted = is_quoted(bytes);
     let (token, err) = unescape_unquote_string(bytes, span);
-    trace!("parsing: directory");
 
     if err.is_none() {
         trace!("-- found {token}");
@@ -2762,9 +2818,20 @@ pub fn parse_directory(working_set: &mut StateWorkingSet, span: Span) -> Express
 
 pub fn parse_filepath(working_set: &mut StateWorkingSet, span: Span) -> Expression {
     let bytes = working_set.get_span_contents(span);
+    trace!("parsing: filepath");
+
+    // Check for bare word interpolation
+    if !bytes.is_empty()
+        && bytes[0] != b'\''
+        && bytes[0] != b'"'
+        && bytes[0] != b'`'
+        && bytes.contains(&b'(')
+    {
+        return parse_string_interpolation(working_set, span);
+    }
+
     let quoted = is_quoted(bytes);
     let (token, err) = unescape_unquote_string(bytes, span);
-    trace!("parsing: filepath");
 
     if err.is_none() {
         trace!("-- found {token}");
@@ -5058,8 +5125,9 @@ pub fn parse_match_block_expression(working_set: &mut StateWorkingSet, span: Spa
                 guard: None,
                 span: Span::new(start, end),
             }
+        }
         // A match guard
-        } else if connector == b"if" {
+        if connector == b"if" {
             let if_end = {
                 let end = output[position].span.end;
                 Span::new(end, end)
@@ -6017,7 +6085,7 @@ pub fn parse_expression(working_set: &mut StateWorkingSet, spans: &[Span]) -> Ex
 
                 parse_call(working_set, &spans[pos..], spans[0])
             }
-            b"let" | b"const" | b"mut" => {
+            b"const" | b"mut" => {
                 working_set.error(ParseError::AssignInPipeline(
                     String::from_utf8(bytes)
                         .expect("builtin commands bytes should be able to convert to string"),

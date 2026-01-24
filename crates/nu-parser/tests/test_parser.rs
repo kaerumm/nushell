@@ -1716,7 +1716,7 @@ mod string {
             let engine_state = EngineState::new();
             let mut working_set = StateWorkingSet::new(&engine_state);
 
-            let block = parse(&mut working_set, None, b"^echo ($nu.home-path)/path", true);
+            let block = parse(&mut working_set, None, b"^echo ($nu.home-dir)/path", true);
 
             assert!(working_set.parse_errors.is_empty());
 
@@ -3168,4 +3168,34 @@ mod record {
         };
         assert_ne!(op.span, rhs.span)
     }
+}
+
+#[test]
+fn parse_let_in_pipeline() {
+    let engine_state = EngineState::new();
+    let mut working_set = StateWorkingSet::new(&engine_state);
+
+    // This should parse without errors
+    let block = parse(&mut working_set, None, b"ls | let files", true);
+
+    assert!(
+        working_set.parse_errors.is_empty(),
+        "Parse errors: {:?}",
+        working_set.parse_errors
+    );
+
+    // Check that we have a pipeline with two elements
+    assert_eq!(block.pipelines.len(), 1);
+    let pipeline = &block.pipelines[0];
+    assert_eq!(pipeline.elements.len(), 2);
+
+    // Both elements should be external calls since ls and let are not declared
+    assert!(matches!(
+        pipeline.elements[0].expr.expr,
+        Expr::ExternalCall(_, _)
+    ));
+    assert!(matches!(
+        pipeline.elements[1].expr.expr,
+        Expr::ExternalCall(_, _)
+    ));
 }

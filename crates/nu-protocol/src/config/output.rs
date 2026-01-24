@@ -2,10 +2,13 @@ use super::{config_update_string_enum, prelude::*};
 
 use crate::{self as nu_protocol};
 
-#[derive(Clone, Copy, Debug, IntoValue, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Debug, IntoValue, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorStyle {
-    Plain,
+    #[default]
     Fancy,
+    Plain,
+    Short,
+    Nested,
 }
 
 impl FromStr for ErrorStyle {
@@ -15,7 +18,9 @@ impl FromStr for ErrorStyle {
         match s.to_ascii_lowercase().as_str() {
             "fancy" => Ok(Self::Fancy),
             "plain" => Ok(Self::Plain),
-            _ => Err("'fancy' or 'plain'"),
+            "short" => Ok(Self::Short),
+            "nested" => Ok(Self::Nested),
+            _ => Err("'fancy', 'plain', 'short' or 'nested'"),
         }
     }
 }

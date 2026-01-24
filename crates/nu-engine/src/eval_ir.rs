@@ -239,7 +239,7 @@ fn eval_ir_block_impl<D: DebugContext>(
                     prepare_error_handler(ctx, error_handler, Some(err.into_spanned(*span)));
                     pc = error_handler.handler_index;
                 } else if need_backtrace {
-                    let err = ShellError::into_chainned(err, *span);
+                    let err = ShellError::into_chained(err, *span);
                     return Err(err);
                 } else {
                     return Err(err);
@@ -274,7 +274,11 @@ fn prepare_error_handler(
                 PipelineExecutionData::from(
                     error
                         .item
-                        .into_value(&StateWorkingSet::new(ctx.engine_state), error.span)
+                        .into_full_value(
+                            &StateWorkingSet::new(ctx.engine_state),
+                            ctx.stack,
+                            error.span,
+                        )
                         .into_pipeline_data(),
                 ),
             );
@@ -354,12 +358,7 @@ fn eval_instruction<D: DebugContext>(
         }
         Instruction::DrainIfEnd { src } => {
             let data = ctx.take_reg(*src);
-            let res = {
-                let stack = &mut ctx
-                    .stack
-                    .push_redirection(ctx.redirect_out.clone(), ctx.redirect_err.clone());
-                data.body.drain_to_out_dests(ctx.engine_state, stack)?
-            };
+            let res = drain_if_end(ctx, data)?;
             ctx.put_reg(*src, PipelineExecutionData::from(res));
             Ok(Continue)
         }
@@ -624,7 +623,7 @@ fn eval_instruction<D: DebugContext>(
                 // Small optimization, so we don't have to copy the string *again*
                 val
             } else {
-                operand_value.to_expanded_string(", ", ctx.engine_state.get_config())
+                operand_value.to_expanded_string(", ", &ctx.stack.get_config(ctx.engine_state))
             };
             string.push_str(&operand);
 
@@ -1087,7 +1086,7 @@ fn eval_call<D: DebugContext>(
     ctx: &mut EvalContext<'_>,
     decl_id: DeclId,
     head: Span,
-    input: PipelineData,
+    mut input: PipelineData,
 ) -> Result<PipelineData, ShellError> {
     let EvalContext {
         engine_state,
@@ -1160,6 +1159,11 @@ fn eval_call<D: DebugContext>(
                 args_len,
             };
 
+            // Make sure that iterating value itself can be interrupted.
+            // e.g: 0..inf | to md
+            if let PipelineData::Value(v, ..) = &mut input {
+                v.inject_signals(engine_state);
+            }
             // Run the call
             decl.run(engine_state, &mut caller_stack, &(&call).into(), input)
         }
@@ -1601,6 +1605,28 @@ fn drain(
     }
     #[cfg(not(feature = "os"))]
     Ok(Continue)
+}
+
+/// Helper for drainIfEnd behavior
+fn drain_if_end(
+    ctx: &mut EvalContext<'_>,
+    data: PipelineExecutionData,
+) -> Result<PipelineData, ShellError> {
+    let stack = &mut ctx
+        .stack
+        .push_redirection(ctx.redirect_out.clone(), ctx.redirect_err.clone());
+    let result = data.body.drain_to_out_dests(ctx.engine_state, stack)?;
+
+    let pipefail = nu_experimental::PIPE_FAIL.get();
+    if !pipefail {
+        return Ok(result);
+    }
+    #[cfg(feature = "os")]
+    {
+        check_exit_status_future(data.exit).map(|_| result)
+    }
+    #[cfg(not(feature = "os"))]
+    Ok(result)
 }
 
 enum RedirectionStream {

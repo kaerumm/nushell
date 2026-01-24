@@ -1,6 +1,5 @@
 use super::util::try_interaction;
-#[allow(deprecated)]
-use nu_engine::{command_prelude::*, env::current_dir};
+use nu_engine::command_prelude::*;
 use nu_glob::MatchOptions;
 use nu_path::expand_path_with;
 use nu_protocol::{
@@ -127,13 +126,12 @@ fn rm(
 
     let mut unique_argument_check = None;
 
-    #[allow(deprecated)]
-    let currentdir_path = current_dir(engine_state, stack)?;
+    let currentdir_path = engine_state.cwd(Some(stack))?.into_std_path_buf();
 
     let home: Option<String> = nu_path::home_dir().map(|path| {
         {
             if path.exists() {
-                nu_path::canonicalize_with(&path, &currentdir_path).unwrap_or(path.into())
+                nu_path::absolute_with(&path, &currentdir_path).unwrap_or(path.into())
             } else {
                 path.into()
             }
@@ -401,13 +399,12 @@ fn rm(
                     // std::fs::remove_dir instead of std::fs::remove_file.
                     #[cfg(windows)]
                     {
-                        f.metadata().and_then(|metadata| {
-                            if metadata.is_dir() {
-                                std::fs::remove_dir(&f)
-                            } else {
-                                std::fs::remove_file(&f)
-                            }
-                        })
+                        use std::os::windows::fs::FileTypeExt;
+                        if metadata.file_type().is_symlink_dir() {
+                            std::fs::remove_dir(&f)
+                        } else {
+                            std::fs::remove_file(&f)
+                        }
                     }
 
                     #[cfg(not(windows))]
@@ -419,7 +416,13 @@ fn rm(
                 };
 
                 if let Err(e) = result {
-                    Err(ShellError::Io(IoError::new(e, span, f)))
+                    let original_error = e.to_string();
+                    Err(ShellError::Io(IoError::new_with_additional_context(
+                        e,
+                        span,
+                        f,
+                        original_error,
+                    )))
                 } else if verbose {
                     let msg = if interactive && !confirmed {
                         "not deleted"
@@ -452,14 +455,31 @@ fn rm(
         }
     });
 
+    let mut cmd_result = Ok(PipelineData::empty());
     for result in iter {
         engine_state.signals().check(&call.head)?;
         match result {
             Ok(None) => {}
             Ok(Some(msg)) => eprintln!("{msg}"),
-            Err(err) => report_shell_error(engine_state, &err),
+            Err(err) => {
+                if !(force
+                    && matches!(
+                        err,
+                        ShellError::Io(IoError {
+                            kind: shell_error::io::ErrorKind::Std(std::io::ErrorKind::NotFound, ..),
+                            ..
+                        })
+                    ))
+                {
+                    if cmd_result.is_ok() {
+                        cmd_result = Err(err);
+                    } else {
+                        report_shell_error(Some(stack), engine_state, &err)
+                    }
+                }
+            }
         }
     }
 
-    Ok(PipelineData::empty())
+    cmd_result
 }

@@ -22,12 +22,13 @@ mod tests;
 pub mod test_util;
 
 use nu_protocol::{
-    ByteStreamType, Config, DeclId, DynamicSuggestion, LabeledError, PipelineData,
+    BlockId, ByteStreamType, Config, DeclId, DynamicSuggestion, LabeledError, PipelineData,
     PipelineMetadata, PluginMetadata, PluginSignature, ShellError, SignalAction, Span, Spanned,
-    Value,
+    Value, ast,
     ast::Operator,
     casing::Casing,
     engine::{ArgType, Closure},
+    ir::IrBlock,
 };
 use nu_utils::SharedCow;
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,18 @@ impl<'a> From<GetCompletionArgType> for ArgType<'a> {
     }
 }
 
+/// A simple wrapper for [`ast::Call`] which contains additional context about completion.
+/// It's used in plugin side.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DynamicCompletionCall {
+    /// the real call, which is generated during parse time.
+    pub call: ast::Call,
+    /// Indicates if there is a placeholder in input buffer.
+    pub strip: bool,
+    /// The position in input buffer, which is useful to find placeholder from arguments.
+    pub pos: usize,
+}
+
 /// Information about `get_dynamic_completion` of a plugin call invocation.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GetCompletionInfo {
@@ -84,6 +97,8 @@ pub struct GetCompletionInfo {
     pub name: String,
     /// The flag name to get completion items.
     pub arg_type: GetCompletionArgType,
+    /// Information about the invocation.
+    pub call: DynamicCompletionCall,
 }
 
 impl<D> CallInfo<D> {
@@ -398,7 +413,7 @@ pub enum StreamMessage {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum PluginCallResponse<D> {
     Ok,
-    Error(LabeledError),
+    Error(ShellError),
     Metadata(PluginMetadata),
     Signature(Vec<PluginSignature>),
     Ordering(Option<Ordering>),
@@ -587,6 +602,8 @@ pub enum EngineCall<D> {
     },
     /// Find a declaration by name
     FindDecl(String),
+    /// Get the compiled IR for a block
+    GetBlockIR(BlockId),
     /// Call a declaration with args
     CallDecl {
         /// The id of the declaration to be called (can be found with `FindDecl`)
@@ -618,6 +635,7 @@ impl<D> EngineCall<D> {
             EngineCall::GetSpanContents(_) => "GetSpanContents",
             EngineCall::EvalClosure { .. } => "EvalClosure",
             EngineCall::FindDecl(_) => "FindDecl",
+            EngineCall::GetBlockIR(_) => "GetBlockIR",
             EngineCall::CallDecl { .. } => "CallDecl",
         }
     }
@@ -653,6 +671,7 @@ impl<D> EngineCall<D> {
                 redirect_stderr,
             },
             EngineCall::FindDecl(name) => EngineCall::FindDecl(name),
+            EngineCall::GetBlockIR(block_id) => EngineCall::GetBlockIR(block_id),
             EngineCall::CallDecl {
                 decl_id,
                 call,
@@ -679,6 +698,7 @@ pub enum EngineCallResponse<D> {
     Config(SharedCow<Config>),
     ValueMap(HashMap<String, Value>),
     Identifier(DeclId),
+    IrBlock(Box<IrBlock>),
 }
 
 impl<D> EngineCallResponse<D> {
@@ -694,6 +714,7 @@ impl<D> EngineCallResponse<D> {
             EngineCallResponse::Config(config) => EngineCallResponse::Config(config),
             EngineCallResponse::ValueMap(map) => EngineCallResponse::ValueMap(map),
             EngineCallResponse::Identifier(id) => EngineCallResponse::Identifier(id),
+            EngineCallResponse::IrBlock(ir) => EngineCallResponse::IrBlock(ir),
         })
     }
 }

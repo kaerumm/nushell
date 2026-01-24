@@ -4,13 +4,15 @@ mod config;
 mod labeled_error;
 mod parse_error;
 mod parse_warning;
+mod short_handler;
+
 pub mod report_error;
 pub mod shell_error;
 pub mod shell_warning;
 
 pub use compile_error::CompileError;
 pub use config::{ConfigError, ConfigWarning};
-pub use labeled_error::{ErrorLabel, LabeledError};
+pub use labeled_error::{ErrorLabel, ErrorSource, LabeledError};
 pub use parse_error::{DidYouMean, ParseError};
 pub use parse_warning::ParseWarning;
 pub use report_error::{
@@ -19,3 +21,4 @@ pub use report_error::{
 };
 pub use shell_error::ShellError;
 pub use shell_warning::ShellWarning;
+pub use short_handler::ShortReportHandler;

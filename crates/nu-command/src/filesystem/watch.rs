@@ -116,7 +116,7 @@ impl Command for Watch {
             .item
             .trim_end_matches(|x| matches!(x, '\x09'..='\x0d'));
 
-        let path = nu_path::canonicalize_with(path_no_whitespace, cwd).map_err(|err| {
+        let path = nu_path::absolute_with(path_no_whitespace, cwd).map_err(|err| {
             ShellError::Io(IoError::new(
                 err,
                 path_arg.span,
@@ -219,7 +219,7 @@ impl Command for Watch {
 
                         match result {
                             Ok(val) => val.print_table(engine_state, stack, false, false)?,
-                            Err(err) => report_shell_error(engine_state, &err),
+                            Err(err) => report_shell_error(Some(stack), engine_state, &err),
                         };
                     }
                 }

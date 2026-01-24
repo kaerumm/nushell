@@ -119,6 +119,8 @@ pub enum Value {
     #[non_exhaustive]
     Range {
         val: Box<Range>,
+        #[serde(skip)]
+        signals: Option<Signals>,
         /// note: spans are being refactored out of Value
         /// please use .span() instead of matching this span value
         #[serde(rename = "span")]
@@ -135,6 +137,8 @@ pub enum Value {
     #[non_exhaustive]
     List {
         vals: Vec<Value>,
+        #[serde(skip)]
+        signals: Option<Signals>,
         /// note: spans are being refactored out of Value
         /// please use .span() instead of matching this span value
         #[serde(rename = "span")]
@@ -192,7 +196,7 @@ pub enum Value {
 // This is to document/enforce the size of `Value` in bytes.
 // We should try to avoid increasing the size of `Value`,
 // and PRs that do so will have to change the number below so that it's noted in review.
-const _: () = assert!(std::mem::size_of::<Value>() <= 48);
+const _: () = assert!(std::mem::size_of::<Value>() <= 56);
 
 impl Clone for Value {
     fn clone(&self) -> Self {
@@ -211,8 +215,13 @@ impl Clone for Value {
                 val: *val,
                 internal_span: *internal_span,
             },
-            Value::Range { val, internal_span } => Value::Range {
+            Value::Range {
+                val,
+                signals,
+                internal_span,
+            } => Value::Range {
                 val: val.clone(),
+                signals: signals.clone(),
                 internal_span: *internal_span,
             },
             Value::Float { val, internal_span } => Value::float(*val, *internal_span),
@@ -235,9 +244,11 @@ impl Clone for Value {
             },
             Value::List {
                 vals,
+                signals,
                 internal_span,
             } => Value::List {
                 vals: vals.clone(),
+                signals: signals.clone(),
                 internal_span: *internal_span,
             },
             Value::Closure { val, internal_span } => Value::Closure {
@@ -1313,7 +1324,7 @@ impl Value {
                     val: col_name,
                     span,
                     casing,
-                    ..
+                    optional,
                 } => match self {
                     Value::List { vals, .. } => {
                         for val in vals.iter_mut() {
@@ -1324,7 +1335,7 @@ impl Value {
                                         record.to_mut().cased_mut(*casing).get_mut(col_name)
                                     {
                                         val.update_data_at_cell_path(path, new_val.clone())?;
-                                    } else {
+                                    } else if !*optional {
                                         return Err(ShellError::CantFindColumn {
                                             col_name: col_name.clone(),
                                             span: Some(*span),
@@ -1334,11 +1345,13 @@ impl Value {
                                 }
                                 Value::Error { error, .. } => return Err(*error.clone()),
                                 v => {
-                                    return Err(ShellError::CantFindColumn {
-                                        col_name: col_name.clone(),
-                                        span: Some(*span),
-                                        src_span: v.span(),
-                                    });
+                                    if !*optional {
+                                        return Err(ShellError::CantFindColumn {
+                                            col_name: col_name.clone(),
+                                            span: Some(*span),
+                                            src_span: v.span(),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1346,7 +1359,7 @@ impl Value {
                     Value::Record { val: record, .. } => {
                         if let Some(val) = record.to_mut().cased_mut(*casing).get_mut(col_name) {
                             val.update_data_at_cell_path(path, new_val)?;
-                        } else {
+                        } else if !*optional {
                             return Err(ShellError::CantFindColumn {
                                 col_name: col_name.clone(),
                                 span: Some(*span),
@@ -1356,26 +1369,32 @@ impl Value {
                     }
                     Value::Error { error, .. } => return Err(*error.clone()),
                     v => {
-                        return Err(ShellError::CantFindColumn {
-                            col_name: col_name.clone(),
-                            span: Some(*span),
-                            src_span: v.span(),
-                        });
+                        if !*optional {
+                            return Err(ShellError::CantFindColumn {
+                                col_name: col_name.clone(),
+                                span: Some(*span),
+                                src_span: v.span(),
+                            });
+                        }
                     }
                 },
                 PathMember::Int {
-                    val: row_num, span, ..
+                    val: row_num,
+                    span,
+                    optional,
                 } => match self {
                     Value::List { vals, .. } => {
                         if let Some(v) = vals.get_mut(*row_num) {
                             v.update_data_at_cell_path(path, new_val)?;
-                        } else if vals.is_empty() {
-                            return Err(ShellError::AccessEmptyContent { span: *span });
-                        } else {
-                            return Err(ShellError::AccessBeyondEnd {
-                                max_idx: vals.len() - 1,
-                                span: *span,
-                            });
+                        } else if !*optional {
+                            if vals.is_empty() {
+                                return Err(ShellError::AccessEmptyContent { span: *span });
+                            } else {
+                                return Err(ShellError::AccessBeyondEnd {
+                                    max_idx: vals.len() - 1,
+                                    span: *span,
+                                });
+                            }
                         }
                     }
                     Value::Error { error, .. } => return Err(*error.clone()),
@@ -1799,6 +1818,33 @@ impl Value {
         opt.into_iter().flatten()
     }
 
+    /// Returns an estimate of the memory size used by this Value in bytes
+    pub fn memory_size(&self) -> usize {
+        match self {
+            Value::Bool { .. } => std::mem::size_of::<Self>(),
+            Value::Int { .. } => std::mem::size_of::<Self>(),
+            Value::Float { .. } => std::mem::size_of::<Self>(),
+            Value::Filesize { .. } => std::mem::size_of::<Self>(),
+            Value::Duration { .. } => std::mem::size_of::<Self>(),
+            Value::Date { .. } => std::mem::size_of::<Self>(),
+            Value::Range { val, .. } => std::mem::size_of::<Self>() + val.memory_size(),
+            Value::String { val, .. } => std::mem::size_of::<Self>() + val.capacity(),
+            Value::Glob { val, .. } => std::mem::size_of::<Self>() + val.capacity(),
+            Value::Record { val, .. } => std::mem::size_of::<Self>() + val.memory_size(),
+            Value::List { vals, .. } => {
+                std::mem::size_of::<Self>() + vals.iter().map(|v| v.memory_size()).sum::<usize>()
+            }
+            Value::Closure { val, .. } => std::mem::size_of::<Self>() + val.memory_size(),
+            Value::Nothing { .. } => std::mem::size_of::<Self>(),
+            Value::Error { error, .. } => {
+                std::mem::size_of::<Self>() + std::mem::size_of_val(error)
+            }
+            Value::Binary { val, .. } => std::mem::size_of::<Self>() + val.capacity(),
+            Value::CellPath { val, .. } => std::mem::size_of::<Self>() + val.memory_size(),
+            Value::Custom { val, .. } => std::mem::size_of::<Self>() + val.memory_size(),
+        }
+    }
+
     pub fn bool(val: bool, span: Span) -> Value {
         Value::Bool {
             val,
@@ -1844,6 +1890,7 @@ impl Value {
     pub fn range(val: Range, span: Span) -> Value {
         Value::Range {
             val: val.into(),
+            signals: None,
             internal_span: span,
         }
     }
@@ -1873,6 +1920,7 @@ impl Value {
     pub fn list(vals: Vec<Value>, span: Span) -> Value {
         Value::List {
             vals,
+            signals: None,
             internal_span: span,
         }
     }
@@ -2051,6 +2099,17 @@ impl Value {
             }),
             // Value::test_custom_value(Box::new(todo!())),
         ]
+    }
+
+    /// inject signals from engine_state so iterating the value
+    /// itself can be interrupted.
+    pub fn inject_signals(&mut self, engine_state: &EngineState) {
+        match self {
+            Value::List { signals: s, .. } | Value::Range { signals: s, .. } => {
+                *s = Some(engine_state.signals().clone());
+            }
+            _ => (),
+        }
     }
 }
 
@@ -2608,6 +2667,21 @@ impl PartialEq for Value {
     }
 }
 
+fn checked_duration_operation<F>(a: i64, b: i64, op: F, span: Span) -> Result<Value, ShellError>
+where
+    F: Fn(i64, i64) -> Option<i64>,
+{
+    if let Some(val) = op(a, b) {
+        Ok(Value::duration(val, span))
+    } else {
+        Err(ShellError::OperatorOverflow {
+            msg: "operation overflowed".to_owned(),
+            span,
+            help: None,
+        })
+    }
+}
+
 impl Value {
     pub fn add(&self, op: Span, rhs: &Value, span: Span) -> Result<Value, ShellError> {
         match (self, rhs) {
@@ -2657,15 +2731,7 @@ impl Value {
                 }
             }
             (Value::Duration { val: lhs, .. }, Value::Duration { val: rhs, .. }) => {
-                if let Some(val) = lhs.checked_add(*rhs) {
-                    Ok(Value::duration(val, span))
-                } else {
-                    Err(ShellError::OperatorOverflow {
-                        msg: "add operation overflowed".into(),
-                        span,
-                        help: None,
-                    })
-                }
+                checked_duration_operation(*lhs, *rhs, i64::checked_add, span)
             }
             (Value::Filesize { val: lhs, .. }, Value::Filesize { val: rhs, .. }) => {
                 if let Some(val) = *lhs + *rhs {
@@ -2746,15 +2812,7 @@ impl Value {
                 }
             }
             (Value::Duration { val: lhs, .. }, Value::Duration { val: rhs, .. }) => {
-                if let Some(val) = lhs.checked_sub(*rhs) {
-                    Ok(Value::duration(val, span))
-                } else {
-                    Err(ShellError::OperatorOverflow {
-                        msg: "subtraction operation overflowed".into(),
-                        span,
-                        help: None,
-                    })
-                }
+                checked_duration_operation(*lhs, *rhs, i64::checked_sub, span)
             }
             (Value::Filesize { val: lhs, .. }, Value::Filesize { val: rhs, .. }) => {
                 if let Some(val) = *lhs - *rhs {
@@ -2856,10 +2914,10 @@ impl Value {
                 }
             }
             (Value::Int { val: lhs, .. }, Value::Duration { val: rhs, .. }) => {
-                Ok(Value::duration(*lhs * *rhs, span))
+                checked_duration_operation(*lhs, *rhs, i64::checked_mul, span)
             }
             (Value::Duration { val: lhs, .. }, Value::Int { val: rhs, .. }) => {
-                Ok(Value::duration(*lhs * *rhs, span))
+                checked_duration_operation(*lhs, *rhs, i64::checked_mul, span)
             }
             (Value::Duration { val: lhs, .. }, Value::Float { val: rhs, .. }) => {
                 Ok(Value::duration((*lhs as f64 * *rhs) as i64, span))
@@ -4618,5 +4676,99 @@ mod tests {
         assert!(Value::test_glob("*.rs").coerce_bool().is_err());
         assert!(Value::test_binary(vec![1, 2, 3]).coerce_bool().is_err());
         assert!(Value::test_duration(3600).coerce_bool().is_err());
+    }
+
+    mod memory_size {
+        use super::*;
+
+        #[test]
+        fn test_primitive_sizes() {
+            // All primitive values should have the same base size (size of the Value enum)
+            let base_size = std::mem::size_of::<Value>();
+
+            assert_eq!(Value::test_bool(true).memory_size(), base_size);
+            assert_eq!(Value::test_int(42).memory_size(), base_size);
+            assert_eq!(Value::test_float(1.5).memory_size(), base_size);
+            assert_eq!(Value::test_nothing().memory_size(), base_size);
+        }
+
+        #[test]
+        fn test_string_size() {
+            let s = "hello world";
+            let val = Value::test_string(s);
+            let base_size = std::mem::size_of::<Value>();
+            // String memory size should be base + capacity (allocated size)
+            let string_val = String::from(s);
+            let expected = base_size + string_val.capacity();
+            assert_eq!(val.memory_size(), expected);
+        }
+
+        #[test]
+        fn test_binary_size() {
+            let data = vec![1, 2, 3, 4, 5];
+            let val = Value::test_binary(data.clone());
+            let base_size = std::mem::size_of::<Value>();
+            let expected = base_size + data.capacity();
+            assert_eq!(val.memory_size(), expected);
+        }
+
+        #[test]
+        fn test_list_size() {
+            let list = Value::test_list(vec![
+                Value::test_int(1),
+                Value::test_int(2),
+                Value::test_int(3),
+            ]);
+
+            let base_size = std::mem::size_of::<Value>();
+            let element_size = std::mem::size_of::<Value>();
+            // List size = base + sum of element sizes
+            let expected = base_size + 3 * element_size;
+            assert_eq!(list.memory_size(), expected);
+        }
+
+        #[test]
+        fn test_record_size() {
+            let record = Value::test_record(record! {
+                "a" => Value::test_int(1),
+                "b" => Value::test_string("hello"),
+            });
+
+            let base_size = std::mem::size_of::<Value>();
+            let record_base_size = std::mem::size_of::<Record>();
+            let key1_size = String::from("a").capacity();
+            let key2_size = String::from("b").capacity();
+            let val1_size = std::mem::size_of::<Value>();
+            let val2_base_size = std::mem::size_of::<Value>();
+            let val2_string_size = String::from("hello").capacity();
+
+            let expected = base_size
+                + record_base_size
+                + key1_size
+                + key2_size
+                + val1_size
+                + (val2_base_size + val2_string_size);
+            assert_eq!(record.memory_size(), expected);
+        }
+
+        #[test]
+        fn test_nested_structure_size() {
+            // Test a more complex nested structure
+            let inner_record = Value::test_record(record! {
+                "x" => Value::test_int(10),
+                "y" => Value::test_string("test"),
+            });
+
+            let list = Value::test_list(vec![inner_record]);
+
+            let record_size = list.memory_size();
+            // The list contains one record, so size should be base + record_size
+            let base_size = std::mem::size_of::<Value>();
+            assert!(record_size > base_size);
+
+            // Verify it's larger than a simple list
+            let simple_list = Value::test_list(vec![Value::test_int(1)]);
+            assert!(record_size > simple_list.memory_size());
+        }
     }
 }
